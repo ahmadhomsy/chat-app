@@ -39,7 +39,8 @@ jobs:
           --project chat-app-28ac0 \
           --out=lib/firebase_options.dart \
           --platforms android,ios \
-          --token $FIREBASE_TOKEN
+          --token $FIREBASE_TOKEN \
+          --yes
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
