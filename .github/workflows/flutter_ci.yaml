@@ -27,15 +27,19 @@ jobs:
       - name: Install FlutterFire CLI
         run: flutter pub global activate flutterfire_cli
 
+      - name: Install Firebase CLI
+        run: |
+          curl -sL https://firebase.tools | bash
+
       - name: Configure Firebase
         env:
           FIREBASE_TOKEN: ${{ secrets.FIREBASE_CLI_TOKEN }}
         run: |
           flutterfire configure \
-            --project chat-app-28ac0 \
-            --out=lib/firebase_options.dart \
-            --platforms android,ios \
-            --token $FIREBASE_TOKEN
+          --project chat-app-28ac0 \
+          --out=lib/firebase_options.dart \
+          --platforms android,ios \
+          --token $FIREBASE_TOKEN
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
