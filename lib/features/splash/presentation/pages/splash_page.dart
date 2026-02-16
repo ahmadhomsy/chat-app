@@ -21,7 +21,7 @@ class _SplashScreenState extends State<SplashScreen>
   late final Animation<double> _fadeAnimation;
 
   @override
-  Future<void> initState() async {
+  void initState() {
     super.initState();
 
     _controller = AnimationController(
@@ -40,9 +40,15 @@ class _SplashScreenState extends State<SplashScreen>
     );
 
     _scaleAnimation = Tween<double>(begin: 0.6, end: 1).animate(scaleCurve);
-
     _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(fadeCurve);
-    await _controller.forward();
+    _controller.forward();
+
+    // استدعاء الدالة async بدون await
+    _initialize();
+  }
+
+  Future<void> _initialize() async {
+    await context.read<SplashCubit>().initializeApp();
   }
 
   @override
