@@ -24,23 +24,15 @@ jobs:
         with:
           channel: stable
 
-      - name: Install FlutterFire CLI
-        run: flutter pub global activate flutterfire_cli
-
-      - name: Install Firebase CLI
-        run: |
-          curl -sL https://firebase.tools | bash
-
-      - name: Configure Firebase
+      - name: Decode google-services.json
         env:
-          FIREBASE_TOKEN: ${{ secrets.FIREBASE_CLI_TOKEN }}
-        run: |
-          flutterfire configure \
-          --project chat-app-28ac0 \
-          --out=lib/firebase_options.dart \
-          --platforms android,ios \
-          --token $FIREBASE_TOKEN \
-          --yes
+          GOOGLE_JSON: ${{ secrets.GOOGLE_SERVICES_JSON_BASE64 }}
+        run: echo $GOOGLE_JSON | base64 --decode > android/app/google-services.json
+
+      - name: Decode firebase_options.dart
+        env:
+          FIREBASE_OPTIONS: ${{ secrets.FIREBASE_OPTIONS_BASE64 }}
+        run: echo $FIREBASE_OPTIONS | base64 --decode > lib/firebase_options.dart
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
