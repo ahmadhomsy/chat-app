@@ -1,9 +1,10 @@
 import 'package:flutter/material.dart';
 
 class SignFieldWidget extends StatelessWidget {
-
   const SignFieldWidget({
-    required this.controller, required this.label, super.key,
+    required this.controller,
+    required this.label,
+    super.key,
     this.isPassword = false,
     this.keyboardType = TextInputType.text,
     this.textInputAction = TextInputAction.next,

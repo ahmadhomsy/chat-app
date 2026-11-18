@@ -21,7 +21,7 @@ class GoogleButton extends StatelessWidget {
           elevation: 0,
         ),
         onPressed: () {
-          context.read<AuthBloc>().add(SignByGoogleEvent());
+          context.read<AuthBloc>().add(const SignByGoogleEvent());
         },
         child: Row(
           mainAxisAlignment: MainAxisAlignment.center,

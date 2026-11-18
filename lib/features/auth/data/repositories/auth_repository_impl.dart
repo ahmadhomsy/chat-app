@@ -8,33 +8,49 @@ import 'package:chat_app/features/auth/domain/repositories/auth_repositories.dar
 import 'package:dartz/dartz.dart';
 
 class AuthRepositoryImpl implements AuthRepositories {
-
   AuthRepositoryImpl({required this.data, required this.networkInfo});
+
   final FirebaseAuthDataSource data;
   final NetworkInfo networkInfo;
 
   Future<Either<Failure, T>> _execute<T>(Future<T> Function() action) async {
     if (!await networkInfo.isConnected) {
-      return Left(OfflineFailure());
+      return const Left(OfflineFailure());
     }
 
     try {
       final result = await action();
       return Right(result);
     } on AlreadyRegisteredException {
-      return Left(AlreadyRegisteredFailure());
+      return const Left(AlreadyRegisteredFailure());
     } on WeekPasswordException {
-      return Left(WeekPasswordFailure());
+      return const Left(WeekPasswordFailure());
     } on SignInException {
-      return Left(SignInFailure());
+      return const Left(SignInFailure());
+    } on WrongPasswordException {
+      return const Left(WrongPasswordFailure());
+    } on UserNotFoundException {
+      return const Left(UserNotFoundFailure());
+    } on UserDisabledException {
+      return const Left(UserDisabledFailure());
+    } on InvalidEmailException {
+      return const Left(InvalidEmailFailure());
     } on TooManyRequestsException {
-      return Left(TooManyRequestsFailure());
+      return const Left(TooManyRequestsFailure());
     } on ServerException {
-      return Left(ServerFailure());
+      return const Left(ServerFailure());
     } on NotVerifiedException {
-      return Left(NotVerifiedFailure());
+      return const Left(NotVerifiedFailure());
+    } on RequiresRecentLoginException {
+      return const Left(RequiresRecentLoginFailure());
+    } on GoogleSignInCancelledException {
+      return const Left(GoogleSignInCancelledFailure());
+    } on OfflineException {
+      return const Left(OfflineFailure());
     } on UnExpectedException {
-      return Left(UnExpectedFailure());
+      return const Left(UnExpectedFailure());
+    } on Object catch (_) {
+      return const Left(UnExpectedFailure());
     }
   }
 
@@ -76,5 +92,10 @@ class AuthRepositoryImpl implements AuthRepositories {
   @override
   Future<Either<Failure, Unit>> deleteAccount() {
     return _execute(data.deleteAccount);
+  }
+
+  @override
+  Future<Either<Failure, Unit>> resetPassword(String email) {
+    return _execute(() => data.resetPassword(email));
   }
 }

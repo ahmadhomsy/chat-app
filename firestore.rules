@@ -1,0 +1,87 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isParticipant(conversationId) {
+      return isAuthenticated() &&
+        request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+    }
+
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Users Collection
+    match /users/{userId} {
+      // Authenticated users can view user profiles for user discovery
+      allow read: if isAuthenticated();
+
+      // Only the user themselves can create their profile document
+      allow create: if isOwner(userId)
+                    && request.resource.data.email is string
+                    && request.resource.data.name is string;
+
+      // Only the user themselves can update their profile; cannot alter protected fields
+      allow update: if isOwner(userId)
+                    && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['email', 'createdAt', 'provider']));
+
+      // Only the user themselves can delete their own profile
+      allow delete: if isOwner(userId);
+    }
+
+    // Conversations Collection
+    match /conversations/{conversationId} {
+      // Must be a participant to read
+      allow read: if isAuthenticated() && request.auth.uid in resource.data.participantIds;
+
+      // Must be authenticated, in participantIds, and match createdBy
+      allow create: if isAuthenticated()
+                    && request.auth.uid in request.resource.data.participantIds
+                    && request.resource.data.createdBy == request.auth.uid;
+
+      // Update rules: participants can update message preview and read receipts;
+      // admin updates require being in adminIds for groups
+      allow update: if isAuthenticated()
+                    && request.auth.uid in resource.data.participantIds
+                    && (
+                      resource.data.type == 'direct'
+                      || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['adminIds', 'createdBy'])
+                      || request.auth.uid in resource.data.adminIds
+                    );
+
+      // Deletion allowed only for creator or admin
+      allow delete: if isAuthenticated()
+                    && (request.auth.uid == resource.data.createdBy || request.auth.uid in resource.data.adminIds);
+
+      // Messages Subcollection
+      match /messages/{messageId} {
+        // Can read if participant in the conversation
+        allow read: if isParticipant(conversationId);
+
+        // Can create message if participant and senderId matches auth.uid
+        allow create: if isParticipant(conversationId)
+                      && request.resource.data.senderId == request.auth.uid
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() > 0;
+
+        // Can update only own messages and cannot alter senderId or createdAt
+        allow update: if isParticipant(conversationId)
+                      && resource.data.senderId == request.auth.uid
+                      && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['senderId', 'createdAt']));
+
+        // Can delete only own messages
+        allow delete: if isParticipant(conversationId)
+                      && resource.data.senderId == request.auth.uid;
+      }
+    }
+  }
+}

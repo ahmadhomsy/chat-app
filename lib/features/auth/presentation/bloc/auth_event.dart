@@ -2,40 +2,52 @@ part of 'auth_bloc.dart';
 
 @immutable
 sealed class AuthEvent extends Equatable {
+  const AuthEvent();
+
   @override
   List<Object?> get props => [];
 }
 
 class SignInEvent extends AuthEvent {
-  SignInEvent({required this.request});
+  const SignInEvent({required this.request});
   final SignInRequest request;
+
   @override
   List<Object> get props => [request];
 }
 
 class SignUpEvent extends AuthEvent {
-  SignUpEvent({required this.request});
+  const SignUpEvent({required this.request});
   final SignUpRequest request;
+
   @override
   List<Object> get props => [request];
 }
 
-class SignByGoogleEvent extends AuthEvent {}
-
-class DeleteAccountEvent extends AuthEvent {}
-
-class CheckVerifiedEvent extends AuthEvent {}
-
-class SendEmailVerificationEvent extends AuthEvent {}
-
-class EmailChanged extends AuthEvent {
-  EmailChanged(this.value);
-  final String value;
+class SignByGoogleEvent extends AuthEvent {
+  const SignByGoogleEvent();
 }
 
-class PasswordChanged extends AuthEvent {
-  PasswordChanged(this.value);
-  final String value;
+class DeleteAccountEvent extends AuthEvent {
+  const DeleteAccountEvent();
 }
 
-class TogglePasswordVisibility extends AuthEvent {}
+class CheckVerifiedEvent extends AuthEvent {
+  const CheckVerifiedEvent();
+}
+
+class SendEmailVerificationEvent extends AuthEvent {
+  const SendEmailVerificationEvent();
+}
+
+class LogoutEvent extends AuthEvent {
+  const LogoutEvent();
+}
+
+class ResetPasswordEvent extends AuthEvent {
+  const ResetPasswordEvent({required this.email});
+  final String email;
+
+  @override
+  List<Object> get props => [email];
+}
