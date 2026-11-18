@@ -383,7 +383,7 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
     try {
       final trimmedQuery = query.trim();
       if (trimmedQuery.isEmpty) {
-        return getAllUsers(currentUserId: currentUserId, limit: 20);
+        return await getAllUsers(currentUserId: currentUserId, limit: 20);
       }
 
       // 1. Direct match by exact email (avoids exposing entire directory)
