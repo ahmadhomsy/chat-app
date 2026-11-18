@@ -2,6 +2,8 @@
 
 A high-performance, production-ready real-time chat application built with **Flutter**, **Firebase**, **Clean Architecture**, and **BLoC/Cubit**.
 
+Firebase Project: `chat-app-28ac0`
+
 ---
 
 ## 📱 Features
@@ -10,24 +12,34 @@ A high-performance, production-ready real-time chat application built with **Flu
   - Email & Password sign-up and sign-in with live email verification check.
   - Google Sign-In with lifecycle safety and graceful cancellation handling.
   - End-to-end Password Reset with dedicated UI feedback.
-  - Safe account deletion flow (revokes authentication before deleting user data).
+  - Safe account deletion flow (handles reauthentication requirements, revokes auth credentials, and triggers authoritative background cleanup).
 - **Real-Time 1-on-1 Messaging**:
   - Deterministic conversation IDs preventing duplicate direct conversations.
-  - Real-time Firestore synchronization for messages and previews.
-  - Read receipts and unread conversation indicators.
-  - Reverse scroll pagination with automatic older message fetching.
+  - Self-chat prevention guards.
+  - Real-time Firestore synchronization for messages and conversation previews.
+  - Read receipts with atomic conversation-level tracking (`lastReadAtByUser`).
+  - Reverse scroll pagination with automatic older message fetching and stream deduplication.
+  - Send message debouncing to eliminate duplicate message submissions.
 - **Group Conversations**:
   - Create groups with custom names, avatars, and member selections.
   - Admin controls and participant list visibility.
+  - Strict security rules enforcing admin-only metadata and participant mutations.
 - **User Discovery & Search**:
-  - Instant user directory search by name or email.
+  - Safe user discovery: exact email lookup and case-sensitive prefix search to prevent full directory scraping.
   - One-tap conversation initialization.
-- **Presence & Activity**:
-  - Lifecycle-aware online/offline presence tracking (`AppLifecycleListener`).
-  - `lastSeen` server timestamps.
-- **Push Notification Integration**:
-  - Firebase Cloud Messaging token synchronization.
-  - Foreground notifications and deep linking to conversations on tap.
+- **Multi-Device Presence Architecture**:
+  - Firebase Realtime Database connection registry (`/status/{userId}/connections/{deviceId}`).
+  - Native `.onDisconnect().remove()` hooks ensuring accurate offline status on sudden crashes or network drops.
+  - Multi-device awareness: user remains online as long as at least one active connection exists.
+  - Server-side Cloud Function mirroring presence into Firestore `/users/{uid}`.
+- **Server-Side Push Notifications & Cloud Functions**:
+  - Cloud Functions (TypeScript) triggered on new message creation (`onNewChatMessage`).
+  - Multicast notification dispatch via Firebase Admin SDK with automatic invalid token pruning.
+  - Foreground notification presentation and direct conversation routing on tap.
+- **Enterprise Security Rules**:
+  - Comprehensive Firestore rules (`firestore.rules`) with participant authorization, private FCM token subcollections (`/users/{uid}/fcmTokens`), and message size limits (2000 chars).
+  - Storage rules (`storage.rules`) verifying conversation membership before permitting attachment downloads.
+  - Realtime Database rules (`database.rules.json`) restricting connection management to owner.
 - **Modern Dark UI**:
   - Elegant `#0E1621` dark navy theme with blue accent colors and responsive layout via `flutter_screenutil`.
 
@@ -44,7 +56,7 @@ lib/
 │   ├── constants/          # Static string keys and localized messages
 │   ├── error/              # Strongly typed Exceptions and Failures
 │   ├── helpers/            # GoRouter helper, Dio helper, NetworkInfo
-│   ├── services/           # PresenceService, NotificationService
+│   ├── services/           # PresenceService (RTDB), NotificationService (FCM)
 │   └── theme/              # Color palettes, text styles, app themes
 ├── features/
 │   ├── auth/               # Authentication feature
@@ -63,8 +75,25 @@ lib/
 ### Architectural Guarantees:
 1. **Separation of Concerns**: Presentation widgets never communicate directly with Firebase. All interactions flow through BLoC/Cubit -> Use Cases -> Repositories -> Data Sources.
 2. **Predictable State Flow**: Feature state is managed exclusively using BLoC and Cubit.
-3. **Typed Functional Error Handling**: Repositories wrap data operations using `dartz` `Either<Failure, T>`. Raw exceptions never reach presentation widgets.
+3. **Typed Functional Error Handling**: Repositories wrap data operations using `dartz` `Either<Failure, T>`. Raw exceptions never escape repository boundaries.
 4. **Testability**: Dependencies are injected through `GetIt`, enabling mocking and unit testing without network dependencies.
+
+---
+
+## ⚡ Cloud Functions & Backend Services
+
+Backend logic resides in the `functions/` directory, written in TypeScript with Firebase Functions SDK v5 and Firebase Admin SDK v12:
+
+- **`onNewChatMessage`**: Listens to Firestore `conversations/{convId}/messages/{msgId}` onCreate. Fetches recipient FCM tokens from `/users/{uid}/fcmTokens`, excludes the sender, dispatches FCM multicast notifications, and automatically purges expired tokens (`messaging/invalid-registration-token`).
+- **`onUserDeleted`**: Authoritative `functions.auth.user().onDelete` trigger. Recursively cleans up Firestore `/users/{uid}`, subcollection `/fcmTokens`, Storage `/avatars/{uid}/*`, and RTDB `/status/{uid}`.
+- **`onUserStatusChanged`**: Listens to RTDB `/status/{userId}/connections`. Syncs aggregate presence (`isOnline`, `lastSeen`) to Firestore `/users/{userId}`.
+
+### Building Cloud Functions
+```bash
+cd functions
+npm install
+npm run build
+```
 
 ---
 
@@ -73,8 +102,9 @@ lib/
 ### Prerequisites
 - **Flutter SDK**: `^3.24.0` (Recommended: `3.41.x` stable)
 - **Dart SDK**: `^3.5.0` (Recommended: `3.11.x`)
-- **Node.js** & **Firebase CLI**: `npm install -g firebase-tools`
+- **Node.js** (v18 or v20) & **Firebase CLI**: `npm install -g firebase-tools`
 - **FlutterFire CLI**: `dart pub global activate flutterfire_cli`
+- **JDK 17** for Android Gradle builds; **JDK 21+** if running local Firebase Java emulators (`firebase emulators:start`).
 
 ### 1. Clone & Install Dependencies
 ```bash
@@ -101,10 +131,14 @@ This command automatically generates:
 - `android/app/google-services.json`
 - `ios/Runner/GoogleService-Info.plist`
 
-### 3. Deploy Firestore Rules and Indexes
-To deploy the security rules and composite indexes:
+### 3. Deploy Security Rules, Indexes & Cloud Functions
+To deploy security rules, composite indexes, Realtime Database rules, and Cloud Functions to `chat-app-28ac0`:
 ```bash
-firebase deploy --only firestore:rules,firestore:indexes,storage
+# Build Cloud Functions
+cd functions && npm install && npm run build && cd ..
+
+# Deploy all services
+firebase deploy --only firestore:rules,firestore:indexes,storage,database,functions
 ```
 
 ---
@@ -127,7 +161,7 @@ flutter run --flavor production --target lib/main_production.dart
 
 ## 🧪 Quality Assurance & Testing
 
-ChatUp enforces strict linting via `very_good_analysis` and includes 39 unit, BLoC, and widget tests.
+ChatUp enforces strict linting via `very_good_analysis` and includes **55 automated unit, BLoC, widget, and integration tests** (100% passing).
 
 ### Run Code Formatting Check
 ```bash
@@ -153,6 +187,13 @@ flutter test
 ```bash
 flutter test --coverage
 ```
+
+### Run Backend Security Rules & Functions Tests
+```bash
+cd functions
+npm test
+```
+*(Note: requires local Firebase emulators running on JDK 21+)*
 
 ---
 

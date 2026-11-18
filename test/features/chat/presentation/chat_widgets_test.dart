@@ -138,9 +138,12 @@ void main() {
         // Send a test message
         await tester.enterText(find.byType(TextField), 'Testing message');
         await tester.tap(find.byIcon(Icons.send_rounded));
-        await tester.pump(const Duration(milliseconds: 50));
+        await tester.pump(const Duration(milliseconds: 350));
 
         expect(fakeRepo.sendMessageCalled, isTrue);
+
+        await tester.pumpWidget(const SizedBox());
+        await tester.pump();
       },
     );
   });

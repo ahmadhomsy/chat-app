@@ -65,14 +65,32 @@ class MessagesBloc extends Bloc<MessagesEvent, MessagesState> {
     Emitter<MessagesState> emit,
   ) {
     if (event.messages.isEmpty) {
-      emit(MessagesEmpty());
+      if (state is! MessagesLoaded) {
+        emit(MessagesEmpty());
+      }
     } else {
-      emit(
-        MessagesLoaded(
-          messages: event.messages,
-          hasReachedEnd: event.messages.length < 30,
-        ),
-      );
+      if (state is MessagesLoaded) {
+        final current = state as MessagesLoaded;
+        // Merge latest stream messages with already paginated older messages
+        final messageMap = <String, MessageEntity>{};
+        for (final msg in current.messages) {
+          messageMap[msg.id] = msg;
+        }
+        for (final msg in event.messages) {
+          messageMap[msg.id] = msg;
+        }
+        final merged = messageMap.values.toList()
+          ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
+        emit(current.copyWith(messages: merged));
+      } else {
+        emit(
+          MessagesLoaded(
+            messages: event.messages,
+            hasReachedEnd: event.messages.length < 30,
+          ),
+        );
+      }
     }
   }
 
@@ -149,8 +167,16 @@ class MessagesBloc extends Bloc<MessagesEvent, MessagesState> {
             ),
           );
         } else {
-          final combined = List<MessageEntity>.from(currentState.messages)
-            ..addAll(olderMessages);
+          final messageMap = <String, MessageEntity>{};
+          for (final msg in currentState.messages) {
+            messageMap[msg.id] = msg;
+          }
+          for (final msg in olderMessages) {
+            messageMap[msg.id] = msg;
+          }
+          final combined = messageMap.values.toList()
+            ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+
           emit(
             currentState.copyWith(
               messages: combined,

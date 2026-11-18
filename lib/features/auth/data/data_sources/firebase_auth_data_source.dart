@@ -182,14 +182,21 @@ class FirebaseAuthDataSourceImpl implements FirebaseAuthDataSource {
     final uid = user.uid;
 
     try {
-      // 1. Delete authentication account first to avoid deleting Firestore data if auth deletion fails
+      // 1. Delete authentication account. If re-auth is needed, throws requires-recent-login.
       await user.delete();
 
-      // 2. Clean up Firestore user profile
-      await _firestore.collection('users').doc(uid).delete();
+      // 2. Best-effort local cleanup; authoritative recursive cleanup is guaranteed by onUserDeleted Cloud Function
+      try {
+        await _firestore.collection('users').doc(uid).delete();
+      } on Object catch (_) {
+        // Ignored: Handled authoritatively by backend Cloud Function
+      }
 
-      // 3. Sign out local session
-      await _firebaseAuth.signOut();
+      // 3. Clean up local session
+      try {
+        await _firebaseAuth.signOut();
+      } on Object catch (_) {}
+
       return unit;
     } on FirebaseAuthException catch (e) {
       if (e.code == 'requires-recent-login') {

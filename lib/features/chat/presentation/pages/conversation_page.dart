@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:chat_app/core/theme/app_colors.dart';
 import 'package:chat_app/features/chat/domain/entities/conversation_entity.dart';
 import 'package:chat_app/features/chat/domain/entities/message_entity.dart';
@@ -28,6 +29,8 @@ class ConversationPage extends StatefulWidget {
 class _ConversationPageState extends State<ConversationPage> {
   final TextEditingController _textController = TextEditingController();
   final ScrollController _scrollController = ScrollController();
+  bool _isSending = false;
+  Timer? _debounceTimer;
 
   @override
   void initState() {
@@ -54,6 +57,7 @@ class _ConversationPageState extends State<ConversationPage> {
 
   @override
   void dispose() {
+    _debounceTimer?.cancel();
     _textController.dispose();
     _scrollController.dispose();
     super.dispose();
@@ -61,7 +65,10 @@ class _ConversationPageState extends State<ConversationPage> {
 
   void _sendMessage() {
     final text = _textController.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty || _isSending) return;
+
+    _isSending = true;
+    _textController.clear();
 
     context.read<MessagesBloc>().add(
       SendMessageEvent(
@@ -72,7 +79,15 @@ class _ConversationPageState extends State<ConversationPage> {
       ),
     );
 
-    _textController.clear();
+    // Debounce to prevent rapid double-tap submission
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 300), () {
+      if (mounted) {
+        setState(() {
+          _isSending = false;
+        });
+      }
+    });
   }
 
   String _formatTime(DateTime dateTime) {
@@ -356,8 +371,11 @@ class _ConversationPageState extends State<ConversationPage> {
           ),
           SizedBox(width: 8.w),
           IconButton(
-            icon: const Icon(Icons.send_rounded, color: AppColors.primary),
-            onPressed: _sendMessage,
+            icon: Icon(
+              Icons.send_rounded,
+              color: _isSending ? Colors.grey : AppColors.primary,
+            ),
+            onPressed: _isSending ? null : _sendMessage,
           ),
         ],
       ),

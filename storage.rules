@@ -18,6 +18,11 @@ service firebase.storage {
       return request.resource.size < maxMb * 1024 * 1024;
     }
 
+    function isConversationParticipant(conversationId) {
+      return isAuthenticated() &&
+        request.auth.uid in firestore.get(/databases/(default)/documents/conversations/$(conversationId)).data.participantIds;
+    }
+
     // Default deny all
     match /{allPaths=**} {
       allow read, write: if false;
@@ -25,18 +30,30 @@ service firebase.storage {
 
     // User Profile Avatars
     match /avatars/{userId}/{fileName} {
+      // Authenticated users can view avatars for user discovery and chat lists
       allow read: if isAuthenticated();
+
+      // Only the account owner can upload or update their avatar
       allow write: if isOwner(userId)
                    && isImage()
                    && isValidSize(5); // 5MB limit
+
+      // Only the account owner can delete their avatar
+      allow delete: if isOwner(userId);
     }
 
     // Chat Media Attachments
     match /conversations/{conversationId}/{fileName} {
-      allow read: if isAuthenticated();
-      allow write: if isAuthenticated()
+      // STRICT PRIVACY: Only participants of the conversation can read or download attachments
+      allow read: if isConversationParticipant(conversationId);
+
+      // Only participants can upload attachments
+      allow write: if isConversationParticipant(conversationId)
                    && (isImage() || request.resource.contentType.matches('application/pdf'))
                    && isValidSize(10); // 10MB limit
+
+      // Only conversation participants can delete attachments
+      allow delete: if isConversationParticipant(conversationId);
     }
   }
 }

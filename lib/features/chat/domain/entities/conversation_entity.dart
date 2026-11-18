@@ -82,6 +82,45 @@ class ConversationEntity extends Equatable {
     return lastMessageAt!.isAfter(lastRead);
   }
 
+  bool isUnreadFor(String currentUserId) => hasUnreadMessages(currentUserId);
+
+  ConversationEntity copyWith({
+    String? id,
+    String? type,
+    List<String>? participantIds,
+    Map<String, ChatParticipantEntity>? participants,
+    String? createdBy,
+    DateTime? createdAt,
+    DateTime? updatedAt,
+    String? lastMessage,
+    DateTime? lastMessageAt,
+    String? lastMessageSenderId,
+    String? lastMessageSenderName,
+    String? groupName,
+    String? groupAvatar,
+    List<String>? adminIds,
+    Map<String, DateTime>? lastReadAtByUser,
+  }) {
+    return ConversationEntity(
+      id: id ?? this.id,
+      type: type ?? this.type,
+      participantIds: participantIds ?? this.participantIds,
+      participants: participants ?? this.participants,
+      createdBy: createdBy ?? this.createdBy,
+      createdAt: createdAt ?? this.createdAt,
+      updatedAt: updatedAt ?? this.updatedAt,
+      lastMessage: lastMessage ?? this.lastMessage,
+      lastMessageAt: lastMessageAt ?? this.lastMessageAt,
+      lastMessageSenderId: lastMessageSenderId ?? this.lastMessageSenderId,
+      lastMessageSenderName:
+          lastMessageSenderName ?? this.lastMessageSenderName,
+      groupName: groupName ?? this.groupName,
+      groupAvatar: groupAvatar ?? this.groupAvatar,
+      adminIds: adminIds ?? this.adminIds,
+      lastReadAtByUser: lastReadAtByUser ?? this.lastReadAtByUser,
+    );
+  }
+
   @override
   List<Object?> get props => [
     id,

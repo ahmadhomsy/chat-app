@@ -33,6 +33,7 @@ import 'package:chat_app/features/chat/presentation/cubit/user_discovery_cubit.d
 import 'package:chat_app/features/splash/presentation/cubit/splash_cubit.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart';
+import 'package:firebase_database/firebase_database.dart';
 import 'package:firebase_messaging/firebase_messaging.dart';
 import 'package:get_it/get_it.dart';
 import 'package:google_sign_in/google_sign_in.dart';
@@ -152,10 +153,15 @@ Future<void> init() async {
     ..registerLazySingleton<NetworkInfo>(() => NetworkInfoImpl(sl()))
     ..registerLazySingleton<FirebaseAuth>(() => FirebaseAuth.instance)
     ..registerLazySingleton<FirebaseFirestore>(() => FirebaseFirestore.instance)
+    ..registerLazySingleton<FirebaseDatabase>(() => FirebaseDatabase.instance)
     ..registerLazySingleton<FirebaseMessaging>(() => FirebaseMessaging.instance)
     ..registerLazySingleton<GoogleSignIn>(() => GoogleSignIn.instance)
     ..registerLazySingleton<PresenceService>(
-      () => PresenceService(firestore: sl(), firebaseAuth: sl()),
+      () => PresenceService(
+        firestore: sl(),
+        firebaseAuth: sl(),
+        database: sl(),
+      ),
     )
     ..registerLazySingleton<NotificationService>(
       () => NotificationService(messaging: sl(), firestore: sl(), auth: sl()),

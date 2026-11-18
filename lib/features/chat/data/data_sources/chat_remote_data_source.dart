@@ -158,6 +158,9 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
     required String currentUserId,
     required UserEntity otherUser,
   }) async {
+    if (currentUserId == otherUser.id) {
+      throw ServerException();
+    }
     try {
       final conversationId = getDirectConversationId(
         currentUserId,
@@ -370,17 +373,53 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
     required String currentUserId,
   }) async {
     try {
-      final trimmedQuery = query.trim().toLowerCase();
-      final snapshot = await _firestore.collection('users').limit(50).get();
+      final trimmedQuery = query.trim();
+      if (trimmedQuery.isEmpty) {
+        return getAllUsers(currentUserId: currentUserId, limit: 20);
+      }
 
+      // 1. Direct match by exact email (avoids exposing entire directory)
+      if (trimmedQuery.contains('@')) {
+        final emailSnapshot = await _firestore
+            .collection('users')
+            .where('email', isEqualTo: trimmedQuery.toLowerCase())
+            .limit(1)
+            .get();
+
+        if (emailSnapshot.docs.isNotEmpty) {
+          return emailSnapshot.docs
+              .map(UserModel.fromFirestore)
+              .where((user) => user.id != currentUserId)
+              .toList();
+        }
+      }
+
+      // 2. Prefix query by name
+      final nameSnapshot = await _firestore
+          .collection('users')
+          .where('name', isGreaterThanOrEqualTo: trimmedQuery)
+          .where('name', isLessThanOrEqualTo: '$trimmedQuery\uf8ff')
+          .limit(20)
+          .get();
+
+      if (nameSnapshot.docs.isNotEmpty) {
+        return nameSnapshot.docs
+            .map(UserModel.fromFirestore)
+            .where((user) => user.id != currentUserId)
+            .toList();
+      }
+
+      // 3. Fallback scoped scan on recent users
+      final snapshot = await _firestore.collection('users').limit(50).get();
+      final lower = trimmedQuery.toLowerCase();
       return snapshot.docs
           .map(UserModel.fromFirestore)
           .where((user) => user.id != currentUserId)
-          .where((user) {
-            if (trimmedQuery.isEmpty) return true;
-            return user.name.toLowerCase().contains(trimmedQuery) ||
-                user.email.toLowerCase().contains(trimmedQuery);
-          })
+          .where(
+            (user) =>
+                user.name.toLowerCase().contains(lower) ||
+                user.email.toLowerCase().contains(lower),
+          )
           .toList();
     } on FirebaseException catch (e) {
       if (e.code == 'permission-denied') {
