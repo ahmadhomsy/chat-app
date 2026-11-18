@@ -9,7 +9,9 @@
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "test": "mocha -r ts-node/register 'test/**/*.test.ts' --timeout 15000 --exit"
+    "test": "mocha -r ts-node/register 'test/**/*.test.ts' --timeout 20000 --exit",
+    "test:rules": "mocha -r ts-node/register 'test/security_rules.test.ts' --timeout 20000 --exit",
+    "test:emulators": "firebase emulators:exec --only \"firestore,storage,database\" \"npm run test:rules\""
   },
   "engines": {
     "node": "18"

@@ -58,6 +58,7 @@ class FakeChatRepository implements ChatRepository {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) async => const Right(unit);
 
   @override

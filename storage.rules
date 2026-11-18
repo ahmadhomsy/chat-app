@@ -55,5 +55,18 @@ service firebase.storage {
       // Only conversation participants can delete attachments
       allow delete: if isConversationParticipant(conversationId);
     }
+
+    match /chats/{conversationId}/{fileName} {
+      // STRICT PRIVACY: Only participants of the conversation can read or download attachments
+      allow read: if isConversationParticipant(conversationId);
+
+      // Only participants can upload attachments
+      allow write: if isConversationParticipant(conversationId)
+                   && (isImage() || request.resource.contentType.matches('application/pdf'))
+                   && isValidSize(10); // 10MB limit
+
+      // Only conversation participants can delete attachments
+      allow delete: if isConversationParticipant(conversationId);
+    }
   }
 }

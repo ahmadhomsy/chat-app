@@ -39,6 +39,7 @@ abstract class ChatRepository {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   });
 
   Future<Either<Failure, Unit>> markConversationAsRead({

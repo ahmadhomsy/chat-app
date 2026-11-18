@@ -13,6 +13,7 @@ class SendMessageUseCase {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) {
     return repository.sendMessage(
       conversationId: conversationId,
@@ -20,6 +21,7 @@ class SendMessageUseCase {
       senderName: senderName,
       text: text,
       type: type,
+      clientMessageId: clientMessageId,
     );
   }
 }

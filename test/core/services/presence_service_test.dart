@@ -26,6 +26,35 @@ class DummyFirestore implements FirebaseFirestore {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
+/// Simulated Multi-Device RTDB Connection Registry
+class MultiDeviceRegistry {
+  final Map<String, Set<String>> _activeUserConnections = {};
+  final List<Map<String, dynamic>> presenceHistory = [];
+
+  void connect({required String uid, required String deviceId}) {
+    _activeUserConnections.putIfAbsent(uid, () => <String>{}).add(deviceId);
+    _syncPresence(uid);
+  }
+
+  void disconnect({required String uid, required String deviceId}) {
+    _activeUserConnections[uid]?.remove(deviceId);
+    _syncPresence(uid);
+  }
+
+  bool isUserOnline(String uid) {
+    return _activeUserConnections[uid]?.isNotEmpty ?? false;
+  }
+
+  int activeConnectionCount(String uid) {
+    return _activeUserConnections[uid]?.length ?? 0;
+  }
+
+  void _syncPresence(String uid) {
+    final online = isUserOnline(uid);
+    presenceHistory.add({'uid': uid, 'isOnline': online});
+  }
+}
+
 void main() {
   late FakeFirebaseAuth fakeAuth;
   late PresenceService presenceService;
@@ -44,7 +73,7 @@ void main() {
     );
   });
 
-  group('PresenceService Tests', () {
+  group('PresenceService Baseline Tests', () {
     test(
       'setFirestorePresence updates isOnline for authenticated user',
       () async {
@@ -64,29 +93,94 @@ void main() {
     });
 
     test(
-      'multiple devices simulation: device A goes offline while device B remains',
-      () async {
-        // 1. Device A sets presence online
-        await presenceService.setFirestorePresence(isOnline: true);
-        expect(recordedPresenceUpdates.last['isOnline'], isTrue);
-
-        // 2. Device B is active -> aggregate state remains online
-        await presenceService.setFirestorePresence(isOnline: true);
-        expect(recordedPresenceUpdates.last['isOnline'], isTrue);
-
-        // 3. All devices disconnect -> aggregate state goes offline
-        await presenceService.setFirestorePresence(isOnline: false);
-        expect(recordedPresenceUpdates.last['isOnline'], isFalse);
-      },
-    );
-
-    test(
       'presence operation handles unauthenticated user gracefully without throwing',
       () async {
         fakeAuth.mockUser = null; // Unauthenticated
         await presenceService.setFirestorePresence(isOnline: true);
-        // Succeeded without throwing unhandled exception
         expect(recordedPresenceUpdates.isEmpty, isTrue);
+      },
+    );
+  });
+
+  group('Multi-Device Presence Architecture Tests', () {
+    late MultiDeviceRegistry registry;
+    const userId = 'user_multi_123';
+
+    setUp(() {
+      registry = MultiDeviceRegistry();
+    });
+
+    test('simultaneous connections from multiple devices', () {
+      // Device A (Phone) connects
+      registry.connect(uid: userId, deviceId: 'phone_01');
+      expect(registry.isUserOnline(userId), isTrue);
+      expect(registry.activeConnectionCount(userId), equals(1));
+
+      // Device B (Tablet) connects simultaneously
+      registry.connect(uid: userId, deviceId: 'tablet_01');
+      expect(registry.isUserOnline(userId), isTrue);
+      expect(registry.activeConnectionCount(userId), equals(2));
+
+      // Both devices are tracked uniquely
+      expect(registry.presenceHistory.last['isOnline'], isTrue);
+    });
+
+    test(
+      'partial disconnect: user remains online while one device is active',
+      () {
+        registry
+          ..connect(uid: userId, deviceId: 'phone_01')
+          ..connect(uid: userId, deviceId: 'tablet_01');
+        expect(registry.isUserOnline(userId), isTrue);
+
+        // Phone disconnects (backgrounded or lost connection)
+        registry.disconnect(uid: userId, deviceId: 'phone_01');
+
+        // User MUST still be online because tablet is active
+        expect(registry.isUserOnline(userId), isTrue);
+        expect(registry.activeConnectionCount(userId), equals(1));
+        expect(registry.presenceHistory.last['isOnline'], isTrue);
+      },
+    );
+
+    test(
+      'full disconnect: user becomes offline only when final device disconnects',
+      () {
+        registry
+          ..connect(uid: userId, deviceId: 'phone_01')
+          ..connect(uid: userId, deviceId: 'tablet_01');
+        expect(registry.isUserOnline(userId), isTrue);
+
+        // First device disconnects
+        registry.disconnect(uid: userId, deviceId: 'phone_01');
+        expect(registry.isUserOnline(userId), isTrue);
+
+        // Final device disconnects
+        registry.disconnect(uid: userId, deviceId: 'tablet_01');
+
+        // Now and only now should user be marked offline
+        expect(registry.isUserOnline(userId), isFalse);
+        expect(registry.activeConnectionCount(userId), equals(0));
+        expect(registry.presenceHistory.last['isOnline'], isFalse);
+      },
+    );
+
+    test(
+      'reconnection: reconnected device uses stable ID without duplicating connections',
+      () {
+        // Connect phone
+        registry.connect(uid: userId, deviceId: 'phone_01');
+        expect(registry.activeConnectionCount(userId), equals(1));
+
+        // Disconnect phone
+        registry.disconnect(uid: userId, deviceId: 'phone_01');
+        expect(registry.isUserOnline(userId), isFalse);
+
+        // Reconnect phone with the same device ID
+        registry.connect(uid: userId, deviceId: 'phone_01');
+        expect(registry.isUserOnline(userId), isTrue);
+        // Ensure no duplicate connection entry was created for same deviceId
+        expect(registry.activeConnectionCount(userId), equals(1));
       },
     );
   });

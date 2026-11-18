@@ -42,6 +42,7 @@ abstract class ChatRemoteDataSource {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   });
 
   Future<Unit> markConversationAsRead({
@@ -306,13 +307,20 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) async {
     try {
       final batch = _firestore.batch();
       final conversationRef = _firestore
           .collection('conversations')
           .doc(conversationId);
-      final messageRef = conversationRef.collection('messages').doc();
+      final messageDocId =
+          (clientMessageId != null && clientMessageId.isNotEmpty)
+          ? clientMessageId
+          : conversationRef.collection('messages').doc().id;
+      final messageRef = conversationRef
+          .collection('messages')
+          .doc(messageDocId);
 
       final messageData = {
         'senderId': senderId,

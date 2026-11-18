@@ -102,6 +102,7 @@ class FakeIntegrationChatRepository implements ChatRepository {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) async {
     final msg = MessageEntity(
       id: 'msg_${DateTime.now().microsecondsSinceEpoch}',

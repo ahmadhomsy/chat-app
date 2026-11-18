@@ -42,22 +42,33 @@ class MessagesStreamErrorEvent extends MessagesEvent {
 }
 
 class SendMessageEvent extends MessagesEvent {
-  const SendMessageEvent({
+  SendMessageEvent({
     required this.conversationId,
     required this.senderId,
     required this.senderName,
     required this.text,
     this.type = 'text',
-  });
+    String? clientMessageId,
+  }) : clientMessageId =
+           clientMessageId ??
+           '${DateTime.now().microsecondsSinceEpoch}_$senderId';
 
   final String conversationId;
   final String senderId;
   final String senderName;
   final String text;
   final String type;
+  final String clientMessageId;
 
   @override
-  List<Object?> get props => [conversationId, senderId, senderName, text, type];
+  List<Object?> get props => [
+    conversationId,
+    senderId,
+    senderName,
+    text,
+    type,
+    clientMessageId,
+  ];
 }
 
 class LoadOlderMessagesEvent extends MessagesEvent {

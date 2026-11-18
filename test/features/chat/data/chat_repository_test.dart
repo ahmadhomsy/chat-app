@@ -105,6 +105,7 @@ class FakeChatRemoteDataSource implements ChatRemoteDataSource {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) async {
     if (throwServerException) throw ServerException();
     return unit;

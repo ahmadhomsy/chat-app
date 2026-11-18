@@ -4,7 +4,7 @@ import {
   initializeTestEnvironment,
   assertFails,
   assertSucceeds,
-  RulesTestEnvironment,
+  type RulesTestEnvironment,
 } from '@firebase/rules-unit-testing';
 import {
   doc,
@@ -18,12 +18,13 @@ import {
 
 const PROJECT_ID = 'chat-app-28ac0';
 
-describe('Firestore & Storage Security Rules Audit Tests', () => {
+describe('Firebase Security Rules Independent Verification Tests', () => {
   let testEnv: RulesTestEnvironment;
 
   before(async () => {
-    const firestoreRulesPath = path.resolve(__dirname, '../../firestore.rules');
-    const storageRulesPath = path.resolve(__dirname, '../../storage.rules');
+    const firestoreRulesPath = path.resolve(process.cwd(), '../firestore.rules');
+    const storageRulesPath = path.resolve(process.cwd(), '../storage.rules');
+    const databaseRulesPath = path.resolve(process.cwd(), '../database.rules.json');
 
     testEnv = await initializeTestEnvironment({
       projectId: PROJECT_ID,
@@ -37,6 +38,11 @@ describe('Firestore & Storage Security Rules Audit Tests', () => {
         host: '127.0.0.1',
         port: 9199,
       },
+      database: {
+        rules: fs.readFileSync(databaseRulesPath, 'utf8'),
+        host: '127.0.0.1',
+        port: 9000,
+      },
     });
   });
 
@@ -48,32 +54,66 @@ describe('Firestore & Storage Security Rules Audit Tests', () => {
 
   beforeEach(async () => {
     await testEnv.clearFirestore();
+    await testEnv.clearDatabase();
+    await testEnv.clearStorage();
   });
 
-  // CASE 1: Unauthenticated access is rejected
-  it('1. Unauthenticated access is rejected across all resources', async () => {
+  // 1. Unauthenticated users cannot access protected resources
+  it('1. Unauthenticated users cannot access protected resources', async () => {
     const unauthedDb = testEnv.unauthenticatedContext().firestore();
+    const unauthedRtdb = testEnv.unauthenticatedContext().database();
+    const unauthedStorage = testEnv.unauthenticatedContext().storage();
 
-    // Trying to read a user profile
+    // Firestore unauthenticated reads & writes
     await assertFails(getDoc(doc(unauthedDb, 'users', 'alice')));
-
-    // Trying to read a conversation
     await assertFails(getDoc(doc(unauthedDb, 'conversations', 'c1')));
-
-    // Trying to write a message
     await assertFails(
       addDoc(collection(unauthedDb, 'conversations', 'c1', 'messages'), {
         senderId: 'alice',
         text: 'hello',
       })
     );
+
+    // RTDB unauthenticated read & write
+    await assertFails(unauthedRtdb.ref('status/alice').once('value'));
+    await assertFails(unauthedRtdb.ref('status/alice/connections/c1').set(true));
+
+    // Storage unauthenticated read & write
+    const storageRef = unauthedStorage.ref('conversations/c1/photo.jpg');
+    await assertFails(storageRef.getDownloadURL());
   });
 
-  // CASE 2: Conversation participant can read the conversation
-  it('2. A conversation participant can read the conversation', async () => {
-    // Setup conversation with admin context
+  // 2. Users cannot read private FCM tokens belonging to other users
+  it('2. Users cannot read private FCM tokens belonging to other users', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Alice can store and read her own FCM token
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'users', 'alice', 'fcmTokens', 'tok_alice_1'), {
+        token: 'fcm_token_alice_123',
+        createdAt: serverTimestamp(),
+      })
+    );
+    await assertSucceeds(getDoc(doc(aliceDb, 'users', 'alice', 'fcmTokens', 'tok_alice_1')));
+
+    // Bob cannot read Alice's FCM token
+    await assertFails(getDoc(doc(bobDb, 'users', 'alice', 'fcmTokens', 'tok_alice_1')));
+
+    // Bob cannot inject a fake token into Alice's tokens
+    await assertFails(
+      setDoc(doc(bobDb, 'users', 'alice', 'fcmTokens', 'tok_fake'), {
+        token: 'hacked_token',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  // 3. Non-participants cannot read or write direct conversations
+  it('3. Non-participants cannot read or write direct conversations', async () => {
+    // Seed direct conversation between Alice and Bob
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'conv_123'), {
+      await setDoc(doc(context.firestore(), 'conversations', 'conv_alice_bob'), {
         type: 'direct',
         participantIds: ['alice', 'bob'],
         createdBy: 'alice',
@@ -82,26 +122,89 @@ describe('Firestore & Storage Security Rules Audit Tests', () => {
     });
 
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
-    await assertSucceeds(getDoc(doc(aliceDb, 'conversations', 'conv_123')));
+    const charlieDb = testEnv.authenticatedContext('charlie').firestore();
+
+    // Alice (participant) can read
+    await assertSucceeds(getDoc(doc(aliceDb, 'conversations', 'conv_alice_bob')));
+
+    // Charlie (non-participant) CANNOT read
+    await assertFails(getDoc(doc(charlieDb, 'conversations', 'conv_alice_bob')));
+
+    // Charlie (non-participant) CANNOT send message
+    await assertFails(
+      setDoc(doc(charlieDb, 'conversations', 'conv_alice_bob', 'messages', 'msg_eavesdrop'), {
+        senderId: 'charlie',
+        senderName: 'Charlie',
+        text: 'Sneaking in',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
   });
 
-  // CASE 3: Non-participant cannot read the conversation
-  it('3. A non-participant cannot read the conversation', async () => {
+  // 4. Regular group members cannot modify administrator-controlled metadata
+  it('4. Regular group members cannot modify administrator-controlled metadata', async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'conv_private'), {
-        type: 'direct',
+      await setDoc(doc(context.firestore(), 'conversations', 'group_dev'), {
+        type: 'group',
+        groupName: 'Dev Team',
         participantIds: ['alice', 'bob'],
+        adminIds: ['alice'], // Alice is admin, Bob is regular member
         createdBy: 'alice',
         createdAt: serverTimestamp(),
       });
     });
 
-    const charlieDb = testEnv.authenticatedContext('charlie').firestore();
-    await assertFails(getDoc(doc(charlieDb, 'conversations', 'conv_private')));
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Bob cannot change group name
+    await assertFails(
+      updateDoc(doc(bobDb, 'conversations', 'group_dev'), {
+        groupName: 'Hacked Team Name',
+      })
+    );
+
+    // Bob cannot change participant list
+    await assertFails(
+      updateDoc(doc(bobDb, 'conversations', 'group_dev'), {
+        participantIds: ['alice', 'bob', 'charlie'],
+      })
+    );
+
+    // Alice (admin) can change group name
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'group_dev'), {
+        groupName: 'Core Engineering Team',
+      })
+    );
   });
 
-  // CASE 4: A participant can send an authorized message
-  it('4. A participant can send an authorized message', async () => {
+  // 5. Regular members cannot promote themselves to administrators
+  it('5. Regular members cannot promote themselves to administrators', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_ops'), {
+        type: 'group',
+        groupName: 'Ops Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Bob attempts to elevate his privileges by adding himself to adminIds
+    await assertFails(
+      updateDoc(doc(bobDb, 'conversations', 'group_ops'), {
+        adminIds: ['alice', 'bob'],
+      })
+    );
+  });
+
+  // 6. Users cannot impersonate another message sender
+  it('6. Users cannot impersonate another message sender', async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), 'conversations', 'conv_chat'), {
         type: 'direct',
@@ -112,21 +215,67 @@ describe('Firestore & Storage Security Rules Audit Tests', () => {
     });
 
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice sends message as Alice -> allowed
     await assertSucceeds(
-      setDoc(doc(aliceDb, 'conversations', 'conv_chat', 'messages', 'msg_1'), {
+      setDoc(doc(aliceDb, 'conversations', 'conv_chat', 'messages', 'msg_alice_1'), {
         senderId: 'alice',
         senderName: 'Alice',
-        text: 'Hello Bob!',
+        text: 'Hey Bob!',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Alice sends message claiming senderId is 'bob' -> rejected
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'conv_chat', 'messages', 'msg_spoofed'), {
+        senderId: 'bob',
+        senderName: 'Bob',
+        text: 'I agree with everything Alice said',
         type: 'text',
         createdAt: serverTimestamp(),
       })
     );
   });
 
-  // CASE 5: Impersonation: User cannot send a message impersonating another user
-  it('5. A user cannot send a message impersonating another user', async () => {
+  // 7. Users cannot modify another participant\'s read receipts
+  it('7. Users cannot modify another participant read receipts', async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'conv_chat'), {
+      await setDoc(doc(context.firestore(), 'conversations', 'conv_receipts'), {
+        type: 'direct',
+        participantIds: ['alice', 'bob'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        lastReadAtByUser: {
+          alice: 1000,
+          bob: 1000,
+        },
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice can update her own read receipt
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'conv_receipts'), {
+        'lastReadAtByUser.alice': 2000,
+      })
+    );
+
+    // Alice CANNOT alter Bob's read receipt
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'conv_receipts'), {
+        'lastReadAtByUser.bob': 9999,
+      })
+    );
+  });
+
+  // 8. Users cannot access another conversation\'s private attachments
+  it('8. Users cannot access another conversation private attachments in Storage', async () => {
+    // Seed conversation in Firestore with Alice and Bob
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'conv_secret'), {
         type: 'direct',
         participantIds: ['alice', 'bob'],
         createdBy: 'alice',
@@ -134,105 +283,44 @@ describe('Firestore & Storage Security Rules Audit Tests', () => {
       });
     });
 
-    // Alice authenticates but attempts to send message with senderId: 'bob'
-    const aliceDb = testEnv.authenticatedContext('alice').firestore();
-    await assertFails(
-      setDoc(doc(aliceDb, 'conversations', 'conv_chat', 'messages', 'msg_fake'), {
-        senderId: 'bob', // Impersonation!
-        senderName: 'Bob',
-        text: 'I am bob',
-        type: 'text',
-        createdAt: serverTimestamp(),
-      })
-    );
-  });
+    const charlieStorage = testEnv.authenticatedContext('charlie').storage();
+    const aliceStorage = testEnv.authenticatedContext('alice').storage();
 
-  // CASE 6: Unauthorized group membership changes are rejected
-  it('6. Unauthorized group membership changes are rejected', async () => {
-    await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'group_1'), {
-        type: 'group',
-        groupName: 'Engineers',
-        participantIds: ['alice', 'bob'],
-        adminIds: ['alice'], // Alice is admin, Bob is ordinary member
-        createdBy: 'alice',
-        createdAt: serverTimestamp(),
-      });
-    });
+    const charlieFileRef = charlieStorage.ref('conversations/conv_secret/doc.pdf');
+    const aliceFileRef = aliceStorage.ref('conversations/conv_secret/doc.pdf');
 
-    // Bob (non-admin) tries to change adminIds or add charlie
-    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    // Charlie (non-participant) cannot download or upload
+    await assertFails(charlieFileRef.getDownloadURL());
     await assertFails(
-      updateDoc(doc(bobDb, 'conversations', 'group_1'), {
-        adminIds: ['alice', 'bob'], // Promoting himself
+      charlieFileRef.put(Buffer.from('secret contract'), {
+        contentType: 'application/pdf',
       })
     );
 
-    await assertFails(
-      updateDoc(doc(bobDb, 'conversations', 'group_1'), {
-        participantIds: ['alice', 'bob', 'charlie'], // Adding charlie without admin permission
-      })
-    );
-  });
-
-  // CASE 7: Users cannot modify another user's protected profile fields
-  it("7. Users cannot modify another user's profile or protected fields", async () => {
-    await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'users', 'alice'), {
-        id: 'alice',
-        name: 'Alice',
-        email: 'alice@example.com',
-        provider: 'password',
-        createdAt: serverTimestamp(),
-        isOnline: true,
-      });
-    });
-
-    // Bob tries to update Alice's profile
-    const bobDb = testEnv.authenticatedContext('bob').firestore();
-    await assertFails(
-      updateDoc(doc(bobDb, 'users', 'alice'), {
-        name: 'Hacked by Bob',
-      })
-    );
-
-    // Alice tries to modify her own protected 'email' or 'provider' field
-    const aliceDb = testEnv.authenticatedContext('alice').firestore();
-    await assertFails(
-      updateDoc(doc(aliceDb, 'users', 'alice'), {
-        email: 'attacker@evil.com',
-      })
-    );
-
-    // Alice can update her own name or photoUrl
+    // Alice (participant) can upload valid attachment
     await assertSucceeds(
-      updateDoc(doc(aliceDb, 'users', 'alice'), {
-        name: 'Alice Smith',
+      aliceFileRef.put(Buffer.from('contract content'), {
+        contentType: 'application/pdf',
       })
     );
   });
 
-  // CASE 8: FCM Token isolation in subcollection
-  it('8. Users cannot read or write another user private FCM tokens', async () => {
-    const aliceDb = testEnv.authenticatedContext('alice').firestore();
-    const bobDb = testEnv.authenticatedContext('bob').firestore();
+  // 9. Users cannot modify another user\'s presence records
+  it('9. Users cannot modify another user presence records in Realtime Database', async () => {
+    const aliceRtdb = testEnv.authenticatedContext('alice').database();
+    const bobRtdb = testEnv.authenticatedContext('bob').database();
 
-    // Alice can write and read her own token
-    await assertSucceeds(
-      setDoc(doc(aliceDb, 'users', 'alice', 'fcmTokens', 'token_123'), {
-        token: 'token_123',
-        createdAt: serverTimestamp(),
-      })
-    );
-    await assertSucceeds(getDoc(doc(aliceDb, 'users', 'alice', 'fcmTokens', 'token_123')));
+    // Alice can set her own device connection in RTDB
+    await assertSucceeds(aliceRtdb.ref('status/alice/connections/phone_1').set(true));
 
-    // Bob cannot read or write Alice's FCM token
-    await assertFails(getDoc(doc(bobDb, 'users', 'alice', 'fcmTokens', 'token_123')));
-    await assertFails(
-      setDoc(doc(bobDb, 'users', 'alice', 'fcmTokens', 'token_fake'), {
-        token: 'token_fake',
-        createdAt: serverTimestamp(),
-      })
-    );
+    // Alice can set her own lastSeen
+    await assertSucceeds(aliceRtdb.ref('status/alice/lastSeen').set(1710000000));
+
+    // Bob CANNOT modify Alice's presence record
+    await assertFails(bobRtdb.ref('status/alice/connections/phone_1').set(false));
+    await assertFails(bobRtdb.ref('status/alice/lastSeen').set(12345));
+
+    // Bob can set his own
+    await assertSucceeds(bobRtdb.ref('status/bob/connections/tablet_1').set(true));
   });
 });

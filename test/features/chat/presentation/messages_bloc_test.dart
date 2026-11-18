@@ -44,6 +44,7 @@ class FakeMessagesChatRepository implements ChatRepository {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) async {
     sendMessageCalled = true;
     return const Right(unit);
@@ -152,7 +153,7 @@ void main() {
 
     test('SendMessageEvent invokes sendMessageUseCase', () async {
       bloc.add(
-        const SendMessageEvent(
+        SendMessageEvent(
           conversationId: 'c1',
           senderId: 'u1',
           senderName: 'User 1',

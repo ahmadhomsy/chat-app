@@ -71,6 +71,7 @@ class FakeGroupChatRepository implements ChatRepository {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) async {
     final group = backend.groups[conversationId];
     if (group == null || !group.participantIds.contains(senderId)) {

@@ -119,6 +119,7 @@ class MessagesBloc extends Bloc<MessagesEvent, MessagesState> {
       senderName: event.senderName,
       text: text,
       type: event.type,
+      clientMessageId: event.clientMessageId,
     );
 
     result.fold(

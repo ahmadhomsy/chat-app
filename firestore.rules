@@ -95,6 +95,12 @@ service cloud.firestore {
                           || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['adminIds', 'participantIds', 'groupName', 'groupAvatar'])
                         )
                       )
+                    )
+                    && (
+                      !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastReadAtByUser'])
+                      || (!('lastReadAtByUser' in resource.data)
+                          ? request.resource.data.lastReadAtByUser.keys().hasOnly([request.auth.uid])
+                          : request.resource.data.lastReadAtByUser.diff(resource.data.lastReadAtByUser).affectedKeys().hasOnly([request.auth.uid]))
                     );
 
       // Deletion allowed only for creator or group admin

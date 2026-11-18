@@ -104,6 +104,7 @@ class ChatRepositoryImpl implements ChatRepository {
     required String senderName,
     required String text,
     String type = 'text',
+    String? clientMessageId,
   }) {
     return _execute(
       () => remoteDataSource.sendMessage(
@@ -112,6 +113,7 @@ class ChatRepositoryImpl implements ChatRepository {
         senderName: senderName,
         text: text,
         type: type,
+        clientMessageId: clientMessageId,
       ),
     );
   }
