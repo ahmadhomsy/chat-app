@@ -8,3 +8,4 @@ if (!admin.apps.length) {
 export { onNewChatMessage } from './notifications';
 export { onUserDeleted } from './cleanup';
 export { onUserStatusChanged } from './presence';
+export { searchUserByEmail } from './search';

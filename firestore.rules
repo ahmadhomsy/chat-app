@@ -24,28 +24,65 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
-    // Users Collection
-    match /users/{userId} {
-      // Authenticated users can view user profiles for user discovery
-      allow read: if isAuthenticated();
+    // Internal Cloud Functions metadata collections: strictly inaccessible to client SDKs
+    match /_function_events/{eventId} {
+      allow read, write: if false;
+    }
 
-      // Only the user themselves can create their profile document
+    match /_cleanup_progress/{uid} {
+      allow read, write: if false;
+    }
+
+    // Private Users Collection
+    // STRICT PRIVACY: Only the account owner can read their private profile document.
+    // Contains sensitive metadata: email, provider, role, createdAt.
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+
+      // Account owner creates their initial profile
       allow create: if isOwner(userId)
                     && request.resource.data.email is string
                     && request.resource.data.name is string;
 
-      // Only the user themselves can update their profile; cannot alter protected fields
+      // Strict field allowlist on profile updates:
+      // Users CANNOT update isOnline, lastSeen, role, email, provider, createdAt.
       allow update: if isOwner(userId)
-                    && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['email', 'createdAt', 'provider']));
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photoUrl', 'updatedAt'])
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100;
 
-      // Only the user themselves can delete their own profile
       allow delete: if isOwner(userId);
 
-      // User Private FCM Tokens Subcollection
-      // STRICT PRIVACY: Only the device owner can read/write their own tokens
+      // Private FCM Tokens Subcollection: only the device owner can manage their tokens
       match /fcmTokens/{tokenId} {
         allow read, write: if isOwner(userId);
       }
+    }
+
+    // Public Users Discovery Collection
+    // Contains non-sensitive profile projection: id, name, photoUrl, isOnline, lastSeen, createdAt, updatedAt.
+    // Excludes email and private security metadata to prevent enumeration.
+    match /public_users/{userId} {
+      allow read: if isAuthenticated();
+
+      allow create: if isOwner(userId)
+                    && request.resource.data.keys().hasOnly(['id', 'name', 'photoUrl', 'isOnline', 'lastSeen', 'createdAt', 'updatedAt'])
+                    && request.resource.data.id == userId
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100
+                    && request.resource.data.isOnline == false
+                    && request.resource.data.lastSeen == null;
+
+      // Account owners can update only presentation fields; presence fields (isOnline, lastSeen) are server-authoritative
+      allow update: if isOwner(userId)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photoUrl', 'updatedAt'])
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100;
+
+      allow delete: if isOwner(userId);
     }
 
     // Conversations Collection
@@ -54,8 +91,8 @@ service cloud.firestore {
       allow read: if isAuthenticated() && request.auth.uid in resource.data.participantIds;
 
       // Creation rules:
-      // Direct: exactly 2 participants, deterministic ID, createdBy is auth user
-      // Group: at least 2 participants, createdBy is auth user and admin
+      // Direct: exactly 2 participants, deterministic document ID, createdBy is auth user
+      // Group: 2 to 100 participants, 1 to 100 admins, createdBy is auth user and admin
       allow create: if isAuthenticated()
                     && request.auth.uid in request.resource.data.participantIds
                     && request.resource.data.createdBy == request.auth.uid
@@ -63,9 +100,15 @@ service cloud.firestore {
                       (
                         request.resource.data.type == 'direct'
                         && request.resource.data.participantIds.size() == 2
+                        && conversationId == (request.resource.data.participantIds[0] < request.resource.data.participantIds[1]
+                           ? request.resource.data.participantIds[0] + '_' + request.resource.data.participantIds[1]
+                           : request.resource.data.participantIds[1] + '_' + request.resource.data.participantIds[0])
                       ) || (
                         request.resource.data.type == 'group'
                         && request.resource.data.participantIds.size() >= 2
+                        && request.resource.data.participantIds.size() <= 100
+                        && request.resource.data.adminIds.size() >= 1
+                        && request.resource.data.adminIds.size() <= 100
                         && request.auth.uid in request.resource.data.adminIds
                         && request.resource.data.groupName is string
                         && request.resource.data.groupName.size() > 0
@@ -74,25 +117,40 @@ service cloud.firestore {
                     );
 
       // Update rules:
-      // Prevent tampering with immutable conversation fields (createdBy, type, createdAt)
-      // For Direct: participantIds cannot change
-      // For Group: only admins can modify groupName, groupAvatar, adminIds, or participantIds
-      // Participants can only update preview fields and their own read timestamp
+      // - Immutable fields: createdBy, type, createdAt cannot be changed
+      // - Direct: participantIds cannot change, adminIds cannot be injected, participants snapshot immutable
+      // - Group non-admin: can ONLY update message-preview fields and own read receipt
+      // - Group admin: can update groupName, groupAvatar, participantIds, adminIds, participants snapshot
+      // - lastReadAtByUser: only the authenticated user's own read receipt entry can be modified
       allow update: if isAuthenticated()
                     && request.auth.uid in resource.data.participantIds
-                    && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdBy', 'type', 'createdAt']))
+                    && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdBy', 'type', 'createdAt'])
                     && (
-                      // Direct conversation updates: participants immutable
+                      // Direct conversation updates: participants immutable, only message-preview & read receipts
                       (
                         resource.data.type == 'direct'
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'lastMessageSenderId', 'lastMessageSenderName', 'updatedAt', 'lastReadAtByUser'])
+                        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
                         && request.resource.data.participantIds == resource.data.participantIds
                       ) || (
                         // Group conversation updates:
                         resource.data.type == 'group'
                         && (
-                          // If non-admin, cannot change adminIds, participantIds, groupName, groupAvatar
-                          request.auth.uid in resource.data.adminIds
-                          || !request.resource.data.diff(resource.data).affectedKeys().hasAny(['adminIds', 'participantIds', 'groupName', 'groupAvatar'])
+                          // Non-admin member: only preview fields and own read receipt
+                          (
+                            !(request.auth.uid in resource.data.adminIds)
+                            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'lastMessageSenderId', 'lastMessageSenderName', 'updatedAt', 'lastReadAtByUser'])
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
+                          ) || (
+                            // Admin member: permitted group management fields
+                            request.auth.uid in resource.data.adminIds
+                            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['groupName', 'groupAvatar', 'participantIds', 'adminIds', 'participants', 'updatedAt', 'lastMessage', 'lastMessageAt', 'lastMessageSenderId', 'lastMessageSenderName', 'lastReadAtByUser'])
+                            && request.resource.data.participantIds.size() >= 2
+                            && request.resource.data.participantIds.size() <= 100
+                            && request.resource.data.adminIds.size() >= 1
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['groupName']) || (request.resource.data.groupName is string && request.resource.data.groupName.size() > 0 && request.resource.data.groupName.size() <= 100))
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
+                          )
                         )
                       )
                     )
@@ -103,7 +161,7 @@ service cloud.firestore {
                           : request.resource.data.lastReadAtByUser.diff(resource.data.lastReadAtByUser).affectedKeys().hasOnly([request.auth.uid]))
                     );
 
-      // Deletion allowed only for creator or group admin
+      // Deletion: conversation creator or group admin
       allow delete: if isAuthenticated()
                     && (
                       request.auth.uid == resource.data.createdBy
@@ -112,25 +170,26 @@ service cloud.firestore {
 
       // Messages Subcollection
       match /messages/{messageId} {
-        // Can read if participant in the parent conversation
         allow read: if isParticipant(conversationId);
 
-        // Can create message if participant, senderId matches auth.uid, and text meets constraints
+        // Message creation: participant check, senderId match, type validation, length bounds
         allow create: if isParticipant(conversationId)
                       && request.resource.data.senderId == request.auth.uid
+                      && request.resource.data.type in ['text', 'image', 'file']
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() > 0
+                      && request.resource.data.text.size() <= 2000
+                      && request.resource.data.createdAt is timestamp;
+
+        // Message updates: only sender, only text and editedAt can change
+        allow update: if isParticipant(conversationId)
+                      && resource.data.senderId == request.auth.uid
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
                       && request.resource.data.text is string
                       && request.resource.data.text.size() > 0
                       && request.resource.data.text.size() <= 2000;
 
-        // Retroactive edits: only sender can edit text; cannot alter senderId or createdAt
-        allow update: if isParticipant(conversationId)
-                      && resource.data.senderId == request.auth.uid
-                      && request.resource.data.text is string
-                      && request.resource.data.text.size() > 0
-                      && request.resource.data.text.size() <= 2000
-                      && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['senderId', 'createdAt']));
-
-        // Deletion: only sender or conversation admin
+        // Deletion: sender or conversation admin
         allow delete: if isParticipant(conversationId)
                       && (
                         resource.data.senderId == request.auth.uid

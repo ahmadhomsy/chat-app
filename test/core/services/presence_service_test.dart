@@ -26,7 +26,7 @@ class DummyFirestore implements FirebaseFirestore {
   dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
 
-/// Simulated Multi-Device RTDB Connection Registry
+/// Simulated Multi-Device RTDB Connection Registry (In-Memory Flow Test Helper)
 class MultiDeviceRegistry {
   final Map<String, Set<String>> _activeUserConnections = {};
   final List<Map<String, dynamic>> presenceHistory = [];
@@ -73,9 +73,9 @@ void main() {
     );
   });
 
-  group('PresenceService Baseline Tests', () {
+  group('[Unit] PresenceService Baseline Tests', () {
     test(
-      'setFirestorePresence updates isOnline for authenticated user',
+      'setFirestorePresence triggers presence listener for authenticated user',
       () async {
         await presenceService.setFirestorePresence(isOnline: true);
 
@@ -85,7 +85,7 @@ void main() {
       },
     );
 
-    test('handleSignOut marks user offline and cleans up', () async {
+    test('handleSignOut marks local presence offline and cleans up', () async {
       await presenceService.handleSignOut();
 
       expect(recordedPresenceUpdates.isNotEmpty, isTrue);
@@ -102,7 +102,7 @@ void main() {
     );
   });
 
-  group('Multi-Device Presence Architecture Tests', () {
+  group('[In-Memory Flow] Multi-Device Presence Architecture Tests', () {
     late MultiDeviceRegistry registry;
     const userId = 'user_multi_123';
 

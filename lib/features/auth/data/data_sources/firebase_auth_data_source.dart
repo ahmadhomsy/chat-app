@@ -72,6 +72,15 @@ class FirebaseAuthDataSourceImpl implements FirebaseAuthDataSource {
         'provider': 'email',
       });
 
+      await _firestore.collection('public_users').doc(user.uid).set({
+        'id': user.uid,
+        'name': request.name.trim(),
+        'photoUrl': null,
+        'lastSeen': null,
+        'isOnline': false,
+        'createdAt': FieldValue.serverTimestamp(),
+      });
+
       await user.sendEmailVerification();
       return unit;
     } on FirebaseAuthException catch (e) {
@@ -188,6 +197,7 @@ class FirebaseAuthDataSourceImpl implements FirebaseAuthDataSource {
       // 2. Best-effort local cleanup; authoritative recursive cleanup is guaranteed by onUserDeleted Cloud Function
       try {
         await _firestore.collection('users').doc(uid).delete();
+        await _firestore.collection('public_users').doc(uid).delete();
       } on Object catch (_) {
         // Ignored: Handled authoritatively by backend Cloud Function
       }
@@ -240,14 +250,24 @@ class FirebaseAuthDataSourceImpl implements FirebaseAuthDataSource {
 
       final userDoc = await _firestore.collection('users').doc(user.uid).get();
       if (!userDoc.exists) {
+        final displayName =
+            user.displayName ?? (user.email?.split('@').first ?? 'User');
         await _firestore.collection('users').doc(user.uid).set({
-          'name': user.displayName ?? (user.email?.split('@').first ?? 'User'),
+          'name': displayName,
           'email': user.email ?? '',
           'photoUrl': user.photoURL,
           'lastSeen': null,
           'isOnline': false,
           'createdAt': FieldValue.serverTimestamp(),
           'provider': 'google',
+        });
+        await _firestore.collection('public_users').doc(user.uid).set({
+          'id': user.uid,
+          'name': displayName,
+          'photoUrl': user.photoURL,
+          'lastSeen': null,
+          'isOnline': false,
+          'createdAt': FieldValue.serverTimestamp(),
         });
       }
 

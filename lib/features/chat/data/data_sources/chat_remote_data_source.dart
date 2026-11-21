@@ -5,6 +5,7 @@ import 'package:chat_app/features/chat/data/models/chat_participant_model.dart';
 import 'package:chat_app/features/chat/data/models/conversation_model.dart';
 import 'package:chat_app/features/chat/data/models/message_model.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:cloud_functions/cloud_functions.dart';
 import 'package:dartz/dartz.dart';
 
 abstract class ChatRemoteDataSource {
@@ -64,9 +65,12 @@ abstract class ChatRemoteDataSource {
 class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
   ChatRemoteDataSourceImpl({
     required FirebaseFirestore firestore,
-  }) : _firestore = firestore;
+    FirebaseFunctions? functions,
+  }) : _firestore = firestore,
+       _functions = functions;
 
   final FirebaseFirestore _firestore;
+  final FirebaseFunctions? _functions;
 
   static String getDirectConversationId(String uid1, String uid2) {
     return uid1.compareTo(uid2) < 0 ? '${uid1}_$uid2' : '${uid2}_$uid1';
@@ -386,25 +390,27 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
         return await getAllUsers(currentUserId: currentUserId, limit: 20);
       }
 
-      // 1. Direct match by exact email (avoids exposing entire directory)
+      // 1. Direct match by exact email via rate-limited backend callable endpoint
       if (trimmedQuery.contains('@')) {
-        final emailSnapshot = await _firestore
-            .collection('users')
-            .where('email', isEqualTo: trimmedQuery.toLowerCase())
-            .limit(1)
-            .get();
-
-        if (emailSnapshot.docs.isNotEmpty) {
-          return emailSnapshot.docs
-              .map(UserModel.fromFirestore)
-              .where((user) => user.id != currentUserId)
-              .toList();
+        try {
+          final functionsInstance = _functions ?? FirebaseFunctions.instance;
+          final callable = functionsInstance.httpsCallable('searchUserByEmail');
+          final result = await callable.call<dynamic>({'email': trimmedQuery});
+          final data = result.data != null
+              ? Map<String, dynamic>.from(result.data as Map)
+              : null;
+          if (data != null && data['id'] != null) {
+            return [UserModel.fromMap(data, data['id'] as String)];
+          }
+          return [];
+        } on Object catch (_) {
+          // If callable is unavailable, proceed to query public directory
         }
       }
 
-      // 2. Prefix query by name
+      // 2. Prefix query by name on public_users collection
       final nameSnapshot = await _firestore
-          .collection('users')
+          .collection('public_users')
           .where('name', isGreaterThanOrEqualTo: trimmedQuery)
           .where('name', isLessThanOrEqualTo: '$trimmedQuery\uf8ff')
           .limit(20)
@@ -417,16 +423,17 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
             .toList();
       }
 
-      // 3. Fallback scoped scan on recent users
-      final snapshot = await _firestore.collection('users').limit(50).get();
+      // 3. Fallback scoped scan on public_users
+      final snapshot = await _firestore
+          .collection('public_users')
+          .limit(50)
+          .get();
       final lower = trimmedQuery.toLowerCase();
       return snapshot.docs
           .map(UserModel.fromFirestore)
           .where((user) => user.id != currentUserId)
           .where(
-            (user) =>
-                user.name.toLowerCase().contains(lower) ||
-                user.email.toLowerCase().contains(lower),
+            (user) => user.name.toLowerCase().contains(lower),
           )
           .toList();
     } on FirebaseException catch (e) {
@@ -445,7 +452,10 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
     int limit = 50,
   }) async {
     try {
-      final snapshot = await _firestore.collection('users').limit(limit).get();
+      final snapshot = await _firestore
+          .collection('public_users')
+          .limit(limit)
+          .get();
 
       return snapshot.docs
           .map(UserModel.fromFirestore)

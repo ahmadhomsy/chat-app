@@ -4,13 +4,14 @@ on:
   push:
     branches:
       - main
+      - hardening
   pull_request:
     branches:
       - main
 
 jobs:
-  quality_checks:
-    name: Code Quality & Automated Tests
+  flutter_checks:
+    name: Flutter Code Quality & Tests
     runs-on: ubuntu-latest
     timeout-minutes: 15
 
@@ -38,3 +39,44 @@ jobs:
 
       - name: Run automated tests
         run: flutter test --coverage
+
+  functions_and_security:
+    name: Cloud Functions & Firebase Security Rules
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: 'functions/package-lock.json'
+
+      - name: Set up Java for Firebase Emulators
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '21'
+
+      - name: Install Firebase Tools CLI
+        run: npm install -g firebase-tools
+
+      - name: Install Functions dependencies
+        working-directory: ./functions
+        run: npm ci
+
+      - name: Build TypeScript Cloud Functions
+        working-directory: ./functions
+        run: npm run build
+
+      - name: Run Functions Unit Tests
+        working-directory: ./functions
+        run: npm test
+
+      - name: Run Firebase Security Rules against Live Emulators
+        working-directory: ./functions
+        run: npx firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
