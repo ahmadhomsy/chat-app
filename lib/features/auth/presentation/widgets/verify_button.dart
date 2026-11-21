@@ -6,9 +6,11 @@ import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:flutter_screenutil/flutter_screenutil.dart';
 
 class VerifyButton extends StatelessWidget {
-
   const VerifyButton({
-    required this.onPressed, required this.name, required this.color, super.key,
+    required this.onPressed,
+    required this.name,
+    required this.color,
+    super.key,
   });
   final VoidCallback onPressed;
   final String name;

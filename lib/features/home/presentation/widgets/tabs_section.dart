@@ -37,10 +37,10 @@ class TabsSection extends StatelessWidget {
 }
 
 class _TabItem extends StatelessWidget {
-
   const _TabItem({
     required this.title,
-    required this.onTap, this.isActive = false,
+    required this.onTap,
+    this.isActive = false,
   });
   final String title;
   final bool isActive;

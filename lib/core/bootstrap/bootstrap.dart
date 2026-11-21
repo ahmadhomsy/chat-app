@@ -1,3 +1,6 @@
+import 'dart:async';
+import 'package:chat_app/core/services/notification_service.dart';
+import 'package:chat_app/core/services/presence_service.dart';
 import 'package:chat_app/firebase_options.dart';
 import 'package:chat_app/injection_container.dart' as di;
 import 'package:firebase_core/firebase_core.dart';
@@ -12,5 +15,9 @@ class Bootstrap {
     );
     await GetStorage.init();
     await di.init();
+
+    // Initialize presence and notification services
+    di.sl<PresenceService>().initialize();
+    unawaited(di.sl<NotificationService>().initialize());
   }
 }

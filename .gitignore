@@ -108,7 +108,6 @@ app.*.map.json
 **/linux/flutter/generated_plugins.cmake
 
 # Firebase sensitive files
-lib/firebase_options.dart
 android/app/google-services.json
 android/app/src/**/google-services.json
 ios/Runner/GoogleService-Info.plist

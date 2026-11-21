@@ -9,6 +9,5 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
   await Bootstrap.init();
   Bloc.observer = sl<MyBlocObserver>();
-
   runApp(const MyApp());
 }

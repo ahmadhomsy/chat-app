@@ -12,4 +12,5 @@ abstract class AuthRepositories {
   Future<Either<Failure, Unit>> logout();
   Future<Either<Failure, Unit>> deleteAccount();
   Future<Either<Failure, bool>> loggedIn();
+  Future<Either<Failure, Unit>> resetPassword(String email);
 }

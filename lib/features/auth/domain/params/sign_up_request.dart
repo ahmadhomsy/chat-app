@@ -1,5 +1,4 @@
 class SignUpRequest {
-
   const SignUpRequest({
     required this.email,
     required this.password,
