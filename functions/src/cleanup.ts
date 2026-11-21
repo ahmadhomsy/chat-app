@@ -1,32 +1,12 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-
-/**
- * Account Deletion Architecture & Retention Policy:
- *
- * 1. Personal Identifiers Purge:
- *    - Private User Profile (`/users/{uid}`): permanently deleted.
- *    - Public User Profile (`/public_users/{uid}`): permanently deleted.
- *    - Private FCM Tokens (`/users/{uid}/fcmTokens/*`): permanently deleted in batches <= 400.
- *    - Storage Profile Avatars (`avatars/{uid}/*`): permanently deleted from Cloud Storage.
- *    - RTDB Presence Nodes (`/status/{uid}`): permanently removed from Realtime Database.
- *
- * 2. Conversational Continuity & Anonymization Policy:
- *    - Messages & Attachments: Preserved to prevent broken conversations and maintain continuity
- *      for surviving participants.
- *    - Participant Identity Anonymization: The user's entry in `participants.{uid}` in all
- *      conversations is redacted to `name: "Deleted Account"`, `photoUrl: null`, `isOnline: false`.
- *    - Read Receipts: The user's entry in `lastReadAtByUser.{uid}` is deleted.
- *    - Group Admin Succession: If the deleted user was a group administrator, they are removed
- *      from `adminIds`. If no admins remain, the oldest remaining participant is promoted.
- *
- * 3. Batch Limits & Resilience:
- *    - Paginated conversation processing in batches of at most 300 updates (Firestore limit: 500).
- *    - Progress persistence under `_cleanup_progress/{uid}` allows safe resumption of interrupted runs.
- *    - Each stage is independently idempotent and retryable.
- */
-
-const CONVERSATION_BATCH_SIZE = 300;
+import {
+  CONVERSATION_BATCH_SIZE,
+  FCM_TOKEN_DELETE_BATCH_SIZE,
+  chunkDocuments,
+  computeAdminSuccession,
+  handleStorageDeletionError,
+} from './cleanup_helpers';
 
 interface CleanupProgress {
   fcmTokensCleaned?: boolean;
@@ -55,7 +35,7 @@ export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
 
   try {
     // ----------------------------------------------------
-    // Stage 1: Purge FCM Tokens Subcollection
+    // Stage 1: Purge FCM Tokens Subcollection (Chunked <= 400)
     // ----------------------------------------------------
     if (!progress.fcmTokensCleaned) {
       functions.logger.info(`Stage 1: Deleting FCM tokens for user ${uid}`);
@@ -66,9 +46,12 @@ export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
         .get();
 
       if (!fcmTokensSnapshot.empty) {
-        const batch = firestore.batch();
-        fcmTokensSnapshot.docs.forEach((doc) => batch.delete(doc.ref));
-        await batch.commit();
+        const tokenChunks = chunkDocuments(fcmTokensSnapshot.docs, FCM_TOKEN_DELETE_BATCH_SIZE);
+        for (const chunk of tokenChunks) {
+          const batch = firestore.batch();
+          chunk.forEach((doc) => batch.delete(doc.ref));
+          await batch.commit();
+        }
       }
 
       await progressRef.set(
@@ -110,11 +93,10 @@ export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
         const bucket = storage.bucket();
         await bucket.deleteFiles({ prefix: `avatars/${uid}/` });
       } catch (storageError: any) {
-        // Code 404 means no files were found; that is normal and safe
-        if (storageError?.code !== 404) {
-          functions.logger.warn(`Storage deletion returned notice for user ${uid}:`, storageError);
-        }
+        handleStorageDeletionError(storageError);
       }
+
+      // Reached only if deletion succeeded or was a safe not-found (404) no-op
       await progressRef.set(
         { avatarsCleaned: true, updatedAt: admin.firestore.FieldValue.serverTimestamp() },
         { merge: true }
@@ -142,7 +124,6 @@ export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
       let hasMore = true;
       let lastDoc: admin.firestore.QueryDocumentSnapshot | null = null;
 
-      // If resuming from a prior run, find the resume point
       if (progress.lastProcessedConversationId) {
         const resumeDoc = await firestore
           .collection('conversations')
@@ -185,14 +166,8 @@ export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
 
           // Admin succession logic for group conversations
           if (data.type === 'group' && Array.isArray(data.adminIds) && data.adminIds.includes(uid)) {
-            const remainingAdmins = data.adminIds.filter((adminId: string) => adminId !== uid);
-            if (remainingAdmins.length === 0) {
-              const otherParticipants = (data.participantIds as string[]).filter((pId: string) => pId !== uid);
-              if (otherParticipants.length > 0) {
-                remainingAdmins.push(otherParticipants[0]);
-              }
-            }
-            updates.adminIds = remainingAdmins;
+            const participantIds: string[] = Array.isArray(data.participantIds) ? data.participantIds : [];
+            updates.adminIds = computeAdminSuccession(data.adminIds, participantIds, uid);
           }
 
           batch.update(doc.ref, updates);
@@ -231,7 +206,6 @@ export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
     functions.logger.info(`Account cleanup completed successfully for user ${uid}.`);
   } catch (error) {
     functions.logger.error(`Error during account cleanup for user ${uid}:`, error);
-    // Rethrow error so Cloud Functions retries
     throw error;
   }
 });

@@ -203,13 +203,11 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
             id: currentUserId,
             name: currentUserName,
             photoUrl: currentUserPhoto,
-            email: currentUserDoc.data()?['email'] as String?,
           ),
           otherUser.id: ChatParticipantModel(
             id: otherUser.id,
             name: otherUser.name,
             photoUrl: otherUser.photoUrl,
-            email: otherUser.email,
             isOnline: otherUser.isOnline,
             lastSeen: otherUser.lastSeen,
           ),
@@ -257,7 +255,6 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
           id: currentUserId,
           name: currentUserName,
           photoUrl: currentUserPhoto,
-          email: currentUserDoc.data()?['email'] as String?,
         ),
       };
 
@@ -268,7 +265,6 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
             id: member.id,
             name: member.name,
             photoUrl: member.photoUrl,
-            email: member.email,
             isOnline: member.isOnline,
             lastSeen: member.lastSeen,
           );

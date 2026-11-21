@@ -33,16 +33,32 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /_rate_limits/{docId} {
+      allow read, write: if false;
+    }
+
     // Private Users Collection
     // STRICT PRIVACY: Only the account owner can read their private profile document.
-    // Contains sensitive metadata: email, provider, role, createdAt.
+    // Contains sensitive metadata: email, provider, createdAt.
     match /users/{userId} {
       allow read: if isOwner(userId);
 
-      // Account owner creates their initial profile
+      // Account owner creates their initial profile with strict field allowlist
+      // Prohibits client injection of role, admin, status, privilege, or server-controlled fields
       allow create: if isOwner(userId)
+                    && request.resource.data.keys().hasOnly(['name', 'email', 'photoUrl', 'lastSeen', 'isOnline', 'createdAt', 'provider', 'phone'])
                     && request.resource.data.email is string
-                    && request.resource.data.name is string;
+                    && request.resource.data.email.size() > 0
+                    && request.resource.data.email.size() <= 254
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100
+                    && request.resource.data.isOnline == false
+                    && request.resource.data.lastSeen == null
+                    && request.resource.data.provider in ['email', 'google']
+                    && request.resource.data.createdAt is timestamp
+                    && (!('photoUrl' in request.resource.data) || request.resource.data.photoUrl == null || request.resource.data.photoUrl is string)
+                    && (!('phone' in request.resource.data) || request.resource.data.phone is string);
 
       // Strict field allowlist on profile updates:
       // Users CANNOT update isOnline, lastSeen, role, email, provider, createdAt.
@@ -50,7 +66,8 @@ service cloud.firestore {
                     && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photoUrl', 'updatedAt'])
                     && request.resource.data.name is string
                     && request.resource.data.name.size() > 0
-                    && request.resource.data.name.size() <= 100;
+                    && request.resource.data.name.size() <= 100
+                    && (!('photoUrl' in request.resource.data) || request.resource.data.photoUrl == null || request.resource.data.photoUrl is string);
 
       allow delete: if isOwner(userId);
 
@@ -172,22 +189,25 @@ service cloud.firestore {
       match /messages/{messageId} {
         allow read: if isParticipant(conversationId);
 
-        // Message creation: participant check, senderId match, type validation, length bounds
+        // Message creation: strict field allowlist, participant check, senderId match, type validation, length bounds
         allow create: if isParticipant(conversationId)
+                      && request.resource.data.keys().hasOnly(['senderId', 'senderName', 'text', 'type', 'createdAt'])
                       && request.resource.data.senderId == request.auth.uid
+                      && (!('senderName' in request.resource.data) || (request.resource.data.senderName is string && request.resource.data.senderName.size() <= 100))
                       && request.resource.data.type in ['text', 'image', 'file']
                       && request.resource.data.text is string
                       && request.resource.data.text.size() > 0
                       && request.resource.data.text.size() <= 2000
                       && request.resource.data.createdAt is timestamp;
 
-        // Message updates: only sender, only text and editedAt can change
+        // Message updates: only original sender, only text and editedAt can change, editedAt must be timestamp
         allow update: if isParticipant(conversationId)
                       && resource.data.senderId == request.auth.uid
                       && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
                       && request.resource.data.text is string
                       && request.resource.data.text.size() > 0
-                      && request.resource.data.text.size() <= 2000;
+                      && request.resource.data.text.size() <= 2000
+                      && request.resource.data.editedAt is timestamp;
 
         // Deletion: sender or conversation admin
         allow delete: if isParticipant(conversationId)

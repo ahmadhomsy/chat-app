@@ -1,5 +1,6 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
+import { enforceSearchRateLimit, sanitizeSearchProfile } from './search_helpers';
 
 /**
  * Rate-limited server-side user lookup endpoint.
@@ -8,20 +9,10 @@ import * as admin from 'firebase-admin';
  * - Direct client-side queries against private user documents are forbidden to prevent
  *   unrestricted email scraping and user enumeration.
  * - Requires Firebase Authentication.
- * - Enforces per-user rate limiting (max 15 lookups per minute).
+ * - Enforces atomic, shared per-user rate limiting stored in `_rate_limits/{uid}` (max 15/min).
  * - Exact match only (no prefix, wildcard, or regex enumeration).
- * - Returns only public profile fields; sensitive account metadata is never exposed.
+ * - Returns only public profile fields; email and sensitive account metadata are never exposed.
  */
-
-interface RateLimitEntry {
-  count: number;
-  resetAtMs: number;
-}
-
-const rateLimitMap = new Map<string, RateLimitEntry>();
-const MAX_SEARCH_REQUESTS_PER_MINUTE = 15;
-const RATE_LIMIT_WINDOW_MS = 60 * 1000;
-
 export const searchUserByEmail = functions.https.onCall(async (data, context) => {
   // 1. Authentication check
   if (!context.auth) {
@@ -32,24 +23,18 @@ export const searchUserByEmail = functions.https.onCall(async (data, context) =>
   }
 
   const callerUid = context.auth.uid;
-  const now = Date.now();
+  const firestore = admin.firestore();
 
-  // 2. Per-user rate limiting
-  const callerLimit = rateLimitMap.get(callerUid);
-  if (!callerLimit || now > callerLimit.resetAtMs) {
-    rateLimitMap.set(callerUid, {
-      count: 1,
-      resetAtMs: now + RATE_LIMIT_WINDOW_MS,
-    });
-  } else {
-    callerLimit.count++;
-    if (callerLimit.count > MAX_SEARCH_REQUESTS_PER_MINUTE) {
+  // 2. Atomic, shared per-user rate limiting via Firestore
+  try {
+    await enforceSearchRateLimit(firestore, callerUid);
+  } catch (err: any) {
+    if (err?.code === 'resource-exhausted') {
       functions.logger.warn(`User ${callerUid} exceeded search rate limit.`);
-      throw new functions.https.HttpsError(
-        'resource-exhausted',
-        'Search rate limit exceeded. Please wait a moment before searching again.'
-      );
+      throw new functions.https.HttpsError('resource-exhausted', err.message);
     }
+    functions.logger.error(`Rate limiter storage error for user ${callerUid}:`, err);
+    throw new functions.https.HttpsError('internal', 'Internal rate limiting error.');
   }
 
   // 3. Input validation
@@ -63,7 +48,6 @@ export const searchUserByEmail = functions.https.onCall(async (data, context) =>
 
   // 4. Exact-match query using Admin SDK
   try {
-    const firestore = admin.firestore();
     const snapshot = await firestore
       .collection('users')
       .where('email', '==', email)
@@ -80,17 +64,8 @@ export const searchUserByEmail = functions.https.onCall(async (data, context) =>
       return null;
     }
 
-    const userData = doc.data();
-
-    // 5. Expose strictly safe public projection
-    return {
-      id: doc.id,
-      name: (userData.name as string) || 'User',
-      email: (userData.email as string) || email,
-      photoUrl: (userData.photoUrl as string) || null,
-      isOnline: (userData.isOnline as boolean) || false,
-      lastSeen: userData.lastSeen ? userData.lastSeen.toDate().toISOString() : null,
-    };
+    // 5. Expose strictly safe public projection (email excluded)
+    return sanitizeSearchProfile(doc.id, doc.data());
   } catch (error: any) {
     functions.logger.error(`Error during searchUserByEmail for ${email}:`, error);
     throw new functions.https.HttpsError('internal', 'Internal search service error.');

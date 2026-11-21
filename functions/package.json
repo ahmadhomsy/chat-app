@@ -9,7 +9,7 @@
     "start": "npm run shell",
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
-    "test": "mocha -r ts-node/register 'test/notifications_and_cleanup.test.ts' --timeout 20000 --exit",
+    "test": "mocha -r ts-node/register 'test/*_helpers.test.ts' --timeout 20000 --exit",
     "test:rules": "mocha -r ts-node/register 'test/security_rules.test.ts' --timeout 20000 --exit",
     "test:emulators": "firebase emulators:exec --only \"firestore,storage,database\" \"npm run test:rules\""
   },
@@ -25,6 +25,9 @@
     "@firebase/rules-unit-testing": "^6.0.0",
     "@types/mocha": "^10.0.6",
     "@types/node": "^20.11.0",
+    "@typescript-eslint/eslint-plugin": "^6.21.0",
+    "@typescript-eslint/parser": "^6.21.0",
+    "eslint": "^8.57.1",
     "mocha": "^10.4.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.3.3"

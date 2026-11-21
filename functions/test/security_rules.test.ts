@@ -151,6 +151,10 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
       await setDoc(doc(context.firestore(), 'users', 'alice'), {
         name: 'Alice',
         email: 'alice@example.com',
+        provider: 'email',
+        isOnline: false,
+        lastSeen: null,
+        createdAt: serverTimestamp(),
       });
     });
 
@@ -342,7 +346,7 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
       })
     );
 
-    // Allowed: Alice edits text content
+    // Allowed: Alice edits text content with editedAt timestamp
     await assertSucceeds(
       updateDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_1'), {
         text: 'Edited message content',
@@ -405,6 +409,7 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     await assertSucceeds(
       setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_new'), {
         senderId: 'alice',
+        senderName: 'Alice',
         text: 'Hello Bob!',
         type: 'text',
         createdAt: serverTimestamp(),
@@ -435,7 +440,7 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     );
   });
 
-  // Additional Boundary: Deterministic Direct Conversation ID Enforcement
+  // 13. Deterministic Direct Conversation ID Enforcement
   it('13. Direct conversation creation enforces deterministic document ID (min_max)', async () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
 
@@ -469,7 +474,7 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     );
   });
 
-  // Additional Boundary: Storage & RTDB Isolation
+  // 14. Storage Attachments and RTDB Isolation
   it('14. Storage attachments and Realtime Database presence isolate access', async () => {
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), 'conversations', 'alice_bob'), {
@@ -506,5 +511,252 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     // Bob CANNOT alter Alice's RTDB presence or lastSeen
     await assertFails(bobRtdb.ref('status/alice/connections/phone_1').set(false));
     await assertFails(bobRtdb.ref('status/alice/lastSeen').set(9999999));
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.1 New Regression Tests: User Creation Hardening (Section 3)
+  // --------------------------------------------------------------------------
+  it('15. User creation hardening: normal profile creation succeeds', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'users', 'alice'), {
+        name: 'Alice Cooper',
+        email: 'alice@example.com',
+        photoUrl: null,
+        lastSeen: null,
+        isOnline: false,
+        provider: 'email',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('16. User creation hardening: injecting role: admin or privilege fields fails', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Attempting to set role: 'admin'
+    await assertFails(
+      setDoc(doc(aliceDb, 'users', 'alice'), {
+        name: 'Alice Cooper',
+        email: 'alice@example.com',
+        role: 'admin',
+        isOnline: false,
+        lastSeen: null,
+        provider: 'email',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Attempting to inject arbitrary privilege or status
+    await assertFails(
+      setDoc(doc(aliceDb, 'users', 'alice'), {
+        name: 'Alice Cooper',
+        email: 'alice@example.com',
+        status: 'verified',
+        privilege: 'superadmin',
+        isOnline: false,
+        lastSeen: null,
+        provider: 'email',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Attempting to start as isOnline: true
+    await assertFails(
+      setDoc(doc(aliceDb, 'users', 'alice'), {
+        name: 'Alice Cooper',
+        email: 'alice@example.com',
+        isOnline: true,
+        lastSeen: null,
+        provider: 'email',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('17. User creation hardening: unexpected arbitrary fields fail', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    await assertFails(
+      setDoc(doc(aliceDb, 'users', 'alice'), {
+        name: 'Alice Cooper',
+        email: 'alice@example.com',
+        unexpectedField: 'malicious',
+        isOnline: false,
+        lastSeen: null,
+        provider: 'email',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.1 New Regression Tests: Message Schema Allowlist (Section 5)
+  // --------------------------------------------------------------------------
+  it('18. Message schema: valid text, image, and file messages succeed', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'alice_bob'), {
+        type: 'direct',
+        participantIds: ['alice', 'bob'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Valid text message
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_txt'), {
+        senderId: 'alice',
+        senderName: 'Alice',
+        text: 'Normal text message',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Valid image message
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_img'), {
+        senderId: 'alice',
+        text: 'https://firebasestorage.googleapis.com/v0/b/.../photo.jpg',
+        type: 'image',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Valid file message
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_file'), {
+        senderId: 'alice',
+        text: 'https://firebasestorage.googleapis.com/v0/b/.../document.pdf',
+        type: 'file',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('19. Message schema: invalid type, spoofed sender, empty, and oversized text fail', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'alice_bob'), {
+        type: 'direct',
+        participantIds: ['alice', 'bob'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Spoofed senderId (Bob's ID while logged in as Alice)
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_bad_sender'), {
+        senderId: 'bob',
+        text: 'Spoofed message',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Unsupported message type
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_bad_type'), {
+        senderId: 'alice',
+        text: 'Audio payload',
+        type: 'audio',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Empty text
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_empty'), {
+        senderId: 'alice',
+        text: '',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Oversized text (> 2000 chars)
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_oversized'), {
+        senderId: 'alice',
+        text: 'x'.repeat(2001),
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Injected unauthorized field on creation
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_injected'), {
+        senderId: 'alice',
+        text: 'Payload',
+        type: 'text',
+        createdAt: serverTimestamp(),
+        deletedAt: serverTimestamp(), // Attempting soft-delete on creation
+      })
+    );
+  });
+
+  it('20. Message schema: message edit requires timestamp editedAt and only text is mutable', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'alice_bob'), {
+        type: 'direct',
+        participantIds: ['alice', 'bob'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'alice_bob', 'messages', 'msg_to_edit'), {
+        senderId: 'alice',
+        text: 'Original message',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Valid edit with editedAt timestamp
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_to_edit'), {
+        text: 'Updated message',
+        editedAt: serverTimestamp(),
+      })
+    );
+
+    // Invalid edit: editedAt is not a timestamp
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_to_edit'), {
+        text: 'Updated message 2',
+        editedAt: 'yesterday',
+      })
+    );
+
+    // Invalid edit: attempting to alter type or senderId
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'alice_bob', 'messages', 'msg_to_edit'), {
+        type: 'image',
+      })
+    );
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.1 New Regression Tests: Internal Collections Lockdown
+  // --------------------------------------------------------------------------
+  it('21. Internal metadata collections (_rate_limits, _function_events, _cleanup_progress) are completely denied to clients', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    await assertFails(getDoc(doc(aliceDb, '_rate_limits', 'alice')));
+    await assertFails(setDoc(doc(aliceDb, '_rate_limits', 'alice'), { count: 0 }));
+
+    await assertFails(getDoc(doc(aliceDb, '_function_events', 'evt_1')));
+    await assertFails(setDoc(doc(aliceDb, '_function_events', 'evt_1'), { state: 'sent' }));
+
+    await assertFails(getDoc(doc(aliceDb, '_cleanup_progress', 'alice')));
+    await assertFails(setDoc(doc(aliceDb, '_cleanup_progress', 'alice'), { completed: true }));
   });
 });

@@ -44,39 +44,47 @@ Pull Request: [#1 (OPEN)](https://github.com/ahmadhomsy/chat-app/pull/1)
   - Google Sign-In with lifecycle safety and graceful cancellation handling.
   - Password Reset flow with dedicated UI feedback.
   - Safe account deletion flow (handles reauthentication requirements, revokes auth credentials, and triggers authoritative background cleanup).
+  - Strict user document creation allowlist in `firestore.rules`: client creation permits only `['name', 'email', 'photoUrl', 'lastSeen', 'isOnline', 'createdAt', 'provider', 'phone']`, requiring `isOnline == false`, `lastSeen == null`, and `provider in ['email', 'google']`, preventing client injection of privileged fields (`role`, `status`, `privilege`, etc.).
 - **Strict User Privacy & Discovery Architecture**:
   - Complete isolation between private user documents (`/users/{userId}`, read restricted strictly to account owner) and public discovery documents (`/public_users/{userId}`).
   - Prevents email scraping and directory enumeration through Firestore rules.
-  - Server-side callable Cloud Function `searchUserByEmail` with per-user rate limiting (max 15/min) and exact-match search.
+  - Server-side callable Cloud Function `searchUserByEmail` with atomic Firestore transaction-based rate limiting (max 15/min via `_rate_limits/{callerUid}`) and exact-match search. The response strictly sanitizes profiles, excluding email and security metadata.
+  - Conversation participant privacy: `ChatParticipantModel.toMap()` omits `email` so participant snapshots in shared conversation documents never expose email addresses to other members.
   - Profile update allowlist: users cannot alter `isOnline`, `lastSeen`, `role`, `email`, `createdAt`, or `provider`.
 - **Real-Time 1-on-1 Messaging**:
   - Deterministic conversation IDs (`min(uid1, uid2) + '_' + max(uid1, uid2)`) enforced directly by Firestore Security Rules.
   - Client-generated stable message identifiers (`clientMessageId`) ensuring message-level idempotency on retries.
   - Read receipts with atomic conversation-level tracking (`lastReadAtByUser`) restricted by rules so users can only update their own read timestamp.
   - Reverse scroll pagination with automatic older message fetching and stream deduplication.
-  - Message schema validation: length 1–2000 chars, senderId match, allowed types (`text`, `image`, `file`), immutable creation metadata, and sender-only text edits.
+  - Message schema validation: creation allowlist strictly bounded to `['senderId', 'senderName', 'text', 'type', 'createdAt']`, length 1–2000 chars, senderId match, and allowed types (`text`, `image`, `file`).
+  - Sender-only text edits requiring `editedAt is timestamp` and diff restricted to `['text', 'editedAt']`.
+  - Soft deletion (`deletedAt`) is excluded from the client update allowlist to prevent unprivileged tampering; message deletion is restricted to document-level deletion via `allow delete`.
 - **Group Conversations & Governance**:
   - Create groups with custom names, avatars, and member selections (2 to 100 participants).
   - Admin controls: regular members cannot alter group name, avatar, or participants; admins cannot alter immutable conversation fields (`type`, `createdBy`, `createdAt`).
-  - Automatic admin succession on account deletion: promotes the oldest remaining participant if no admins remain.
+  - Automatic admin succession on account deletion: promotes existing co-admins or deterministically falls back to the lexicographically lowest participant UID if no admins remain.
 - **Multi-Device Presence Architecture**:
   - Firebase Realtime Database connection registry (`/status/{userId}/connections/{deviceId}`) is the sole source of truth for active device connections.
   - Native `.onDisconnect().remove()` and `.onDisconnect().set(ServerValue.timestamp)`.
   - Closing or backgrounding one device never marks the user offline while another active connection exists.
   - Server-side Cloud Function (`onUserStatusChanged`) authoritatively aggregates presence and mirrors `isOnline` and `lastSeen` to both `/users/{uid}` and `/public_users/{uid}`.
   - Mobile clients never directly write presence to Firestore (enforced by Security Rules).
+  - Timestamp-based ordering guard (`presenceLastEventTimeMs`) prevents out-of-order race conditions from overwriting fresh state.
 - **Durable Push Notifications & Cloud Functions**:
   - Node.js 22 runtime with Firebase Functions SDK v5 and Firebase Admin SDK v12.
   - Event-level distributed locking with 60-second lease timeout in `_function_events` preventing concurrent duplicate processing.
   - Multicast batching in chunks of $\le 500$ tokens to strictly comply with Firebase Admin limits.
   - Token deduplication across multiple user devices.
-  - Automatic pruning of invalid and unregistered tokens (`messaging/invalid-registration-token`, `messaging/registration-token-not-registered`).
+  - Individual token error classification: permanent token errors (`messaging/invalid-registration-token`, `messaging/registration-token-not-registered`) are pruned; transient errors are recorded and rethrown so Cloud Functions can retry.
+  - An event is never prematurely marked `sent` while retryable failures remain.
   - Partial delivery tracking in `sentTokens` so retries skip already-delivered recipients.
   - Documented at-least-once external FCM delivery semantics.
 - **Resilient Account Deletion & Anonymization**:
   - Triggered automatically via `functions.auth.user().onDelete`.
   - Independent retryable stages tracked in `_cleanup_progress/{uid}`.
-  - Paginated conversation processing in batches of $\le 300$ updates to strictly respect the Firestore 500-operation WriteBatch cap.
+  - FCM token deletion chunked in batches of $\le 400$ to strictly respect the Firestore 500-operation WriteBatch cap.
+  - Paginated conversation processing in batches of $\le 300$ updates.
+  - Storage deletion error handling: 404 (not found) is treated as a successful no-op, whereas transient non-404 errors rethrow for retry.
   - Retention policy: conversational continuity preserved (messages and attachments retained); personal identifiers, avatars, FCM tokens, and presence nodes permanently deleted; participant profiles anonymized to `Deleted Account`.
 
 ---
@@ -119,18 +127,19 @@ Backend logic resides in the `functions/` directory, written in TypeScript targe
 - **`onUserStatusChanged`**: Triggers on RTDB `/status/{userId}/connections`. Live snapshot inspection, multi-device aggregation, and mirror to `/users/{userId}` and `/public_users/{userId}`.
 - **`searchUserByEmail`**: HTTPS callable function for exact email search with authentication, per-user rate limiting (max 15/min), and public profile projection.
 
-### Building Cloud Functions
+### Building & Linting Cloud Functions
 ```bash
 cd functions
 npm ci
 npm run build
+npm run lint
 ```
 
 ---
 
 ## 🧪 Quality Assurance & Test Breakdown
 
-The test suite contains **81 automated tests** across four distinct categories:
+The test suite contains **110 automated tests** across six distinct test suites:
 
 1. **Flutter Unit Tests (34 tests)**:
    - Auth repository error mapping and offline detection.
@@ -147,31 +156,35 @@ The test suite contains **81 automated tests** across four distinct categories:
    - Home tabs switching (All, Online, Groups).
    - Conversation page message bubbles, header, and input debouncing.
    - App theme and logo smoke test.
-4. **Cloud Functions Unit & Logic Tests (9 tests)**:
-   - Token chunking ($\le 500$).
-   - Event concurrency guard and 60-second lease timeout.
-   - Retry filtering with `previouslySentTokens`.
-   - Prunable error code classification.
-   - Group admin succession and co-admin preservation.
-   - Participant anonymization.
-   - Firestore batch write safety ($\le 300 \le 500$).
-   - Stage tracking idempotency.
-5. **Firebase Emulator Integration Tests (14 tests)**:
+4. **Flutter Privacy & Participant Model Tests (4 tests)**:
+   - Verification that `ChatParticipantModel.toMap()` excludes participant email.
+   - Legacy backward compatibility parsing optional `email` in `fromMap()`.
+   - Direct and group conversation participant snapshot privacy isolation.
+5. **Cloud Functions Unit & Production Helper Tests (27 tests)**:
+   - **Account Cleanup Helpers (`cleanup_helpers.test.ts`, 9 tests)**: Token chunking ($\le 400$), conversation query limit ($\le 300 \le 500$), storage 404 vs non-404 error handling, deterministic admin succession fallback, co-admin preservation, stage tracking idempotency, retry safety.
+   - **Push Notification Helpers (`notifications_helpers.test.ts`, 11 tests)**: All-tokens success, permanent invalid token pruning, transient token retryability, multi-chunk dispatch ($\le 500$), retry filtering with `previouslySentTokens`, progress persistence errors, concurrency lease lock contention and recovery, non-premature completion checks, error code classification.
+   - **Presence Ordering Guard (`presence_helpers.test.ts`, 3 tests)**: Timestamp-based concurrency guard preventing out-of-order writes from stale events.
+   - **Search Rate Limiting & Privacy Helpers (`search_helpers.test.ts`, 4 tests)**: Atomic Firestore transaction on `_rate_limits/{callerUid}`, sliding 15 req/min window enforcement, counter reset on window expiration, strict profile sanitization excluding email and security metadata.
+6. **Firebase Emulator Integration Tests (21 tests)**:
    - Unauthenticated access denial (Firestore, RTDB, Storage).
    - Private FCM token isolation.
    - User profile enumeration denial (`getDocs(collection('users'))` fails).
    - Private email read denial and public profile read allowance.
    - Server-authoritative presence tamper denial (`isOnline`).
-   - Server-controlled role and email tamper denial.
+   - Server-controlled role and privilege tamper denial.
+   - Strict user creation field allowlist enforcement (rejects `role`, `status`, `privilege`).
    - Direct conversation `adminIds` and participant snapshot tamper denial.
    - Non-admin group member modification denial.
    - Non-admin `lastMessageSenderId` spoofing denial.
    - Group admin immutable field tamper denial (`type`, `createdBy`).
    - Message metadata tamper denial (`senderId`, `createdAt`).
+   - Message creation strict schema allowlist and length bounds enforcement.
+   - Message update allowlist (only sender can edit `text` and `editedAt`).
    - Non-participant message subcollection access denial.
    - Valid participant message creation, text editing, and read-receipt updates.
    - Deterministic direct conversation ID enforcement (`min_max`).
    - Storage attachment and RTDB presence authorization boundaries.
+   - Internal metadata collections protection (`_rate_limits`, `_function_events`, `_cleanup_progress`).
 
 ### Run Verification Commands
 
@@ -182,15 +195,33 @@ dart format --output=none --set-exit-if-changed .
 # 2. Static Code Analysis (Zero warnings/infos)
 flutter analyze --fatal-infos --fatal-warnings
 
-# 3. Flutter Automated Tests (58 tests)
+# 3. Flutter Automated Tests (62 tests)
 flutter test
 
-# 4. Cloud Functions Build & Unit Tests (9 tests)
-cd functions && npm run build && npm test && cd ..
+# 4. Cloud Functions Build, Lint & Unit Tests (27 tests)
+cd functions && npm run build && npm run lint && npm test && cd ..
 
-# 5. Firebase Security Rules Tests against Live Emulators (14 tests)
+# 5. Firebase Security Rules Tests against Live Emulators (21 tests)
 cd functions && npx firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
 ```
+
+---
+
+## ⚙️ Firestore TTL & Composite Indexes
+
+Firestore TTL policies are defined in `firestore.indexes.json` using `fieldOverrides` with `ttl: true`:
+- `_function_events.expiresAt` (collection-group)
+- `_rate_limits.expiresAt` (collection-group)
+
+### Production CLI Activation
+When operational deployment is authorized, run:
+```bash
+gcloud firestore fields ttls update expiresAt --collection-group=_function_events
+gcloud firestore fields ttls update expiresAt --collection-group=_rate_limits
+```
+
+> [!NOTE]
+> TTL policies are configured in the repository's `firestore.indexes.json`, but in accordance with governance rules, live cloud deployment to `chat-app-28ac0` has not been performed.
 
 ---
 

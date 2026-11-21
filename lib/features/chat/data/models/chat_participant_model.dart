@@ -22,6 +22,7 @@ class ChatParticipantModel extends ChatParticipantEntity {
     return ChatParticipantModel(
       id: id,
       name: (map['name'] as String?)?.trim() ?? 'User',
+      // Backwards-compatibility read: existing conversation snapshots may contain email
       email: map['email'] as String?,
       photoUrl: map['photoUrl'] as String?,
       isOnline: (map['isOnline'] as bool?) ?? false,
@@ -29,11 +30,14 @@ class ChatParticipantModel extends ChatParticipantEntity {
     );
   }
 
+  /// Serializes participant snapshot to Firestore.
+  /// PRIVACY REMEDIATION (Phase 4.1):
+  /// Participant email addresses are strictly excluded from serialization to prevent
+  /// leaking private user emails to other conversation or group members.
   Map<String, dynamic> toMap() {
     return {
       'id': id,
       'name': name,
-      if (email != null) 'email': email,
       if (photoUrl != null) 'photoUrl': photoUrl,
       'isOnline': isOnline,
       if (lastSeen != null) 'lastSeen': Timestamp.fromDate(lastSeen!),

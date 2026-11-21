@@ -62,18 +62,22 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Install Firebase Tools CLI
-        run: npm install -g firebase-tools
+      - name: Install Pinned Firebase Tools CLI
+        run: npm install -g firebase-tools@15.2.1
 
       - name: Install Functions dependencies
         working-directory: ./functions
         run: npm ci
 
+      - name: Lint Cloud Functions
+        working-directory: ./functions
+        run: npm run lint
+
       - name: Build TypeScript Cloud Functions
         working-directory: ./functions
         run: npm run build
 
-      - name: Run Functions Unit Tests
+      - name: Run Functions Production-Helper Unit Tests
         working-directory: ./functions
         run: npm test
 
