@@ -215,4 +215,74 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
     assert.deepStrictEqual(result.sampleAffectedConversationIds, ['conv_leaked']);
     assert.strictEqual(result.dryRun, true);
   });
+
+  it('11. Migration Execution Guard: enforces operational environment token, backup verification, and production safety lock', async () => {
+    const { executeParticipantEmailSanitization } = await import('../src/migrations/dry_run_strip_participant_emails');
+    const mockFirestore: any = {
+      collection: () => ({
+        orderBy: () => ({
+          limit: () => ({
+            get: async () => ({ empty: true, docs: [], size: 0 }),
+          }),
+        }),
+      }),
+    };
+
+    // 1. Rejects when authorization token doesn't match environment
+    process.env.MIGRATION_EXECUTION_TOKEN = 'VALID_SECRET_TOKEN_123';
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'WRONG_TOKEN',
+          verifiedBackupId: 'gs://chat-app-28ac0-backups/2026-11-22',
+          verifiedBackupTimestamp: '2026-11-22T00:00:00.000Z',
+          targetProjectId: 'staging-project',
+        });
+      },
+      /MIGRATION_BLOCKED: Missing or invalid execution authorization token/
+    );
+
+    // 2. Rejects when backup ID is missing
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'VALID_SECRET_TOKEN_123',
+          verifiedBackupId: '',
+          verifiedBackupTimestamp: '2026-11-22T00:00:00.000Z',
+          targetProjectId: 'staging-project',
+        });
+      },
+      /MIGRATION_BLOCKED: Must provide a verified backup ID/
+    );
+
+    // 3. Rejects when backup timestamp is invalid
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'VALID_SECRET_TOKEN_123',
+          verifiedBackupId: 'gs://chat-app-28ac0-backups/2026-11-22',
+          verifiedBackupTimestamp: 'invalid-date',
+          targetProjectId: 'staging-project',
+        });
+      },
+      /MIGRATION_BLOCKED: Must provide a valid ISO timestamp/
+    );
+
+    // 4. Rejects when targeting production project without ALLOW_PRODUCTION_MIGRATION
+    delete process.env.ALLOW_PRODUCTION_MIGRATION;
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'VALID_SECRET_TOKEN_123',
+          verifiedBackupId: 'gs://chat-app-28ac0-backups/2026-11-22',
+          verifiedBackupTimestamp: '2026-11-22T00:00:00.000Z',
+          targetProjectId: 'chat-app-28ac0',
+        });
+      },
+      /PRODUCTION_MIGRATION_LOCKED/
+    );
+
+    // Clean up test environment
+    delete process.env.MIGRATION_EXECUTION_TOKEN;
+  });
 });

@@ -107,30 +107,66 @@ export async function auditLegacyParticipantEmails(
   };
 }
 
+export interface MigrationExecutionOptions {
+  authorizationToken: string;
+  verifiedBackupId: string;
+  verifiedBackupTimestamp: string;
+  targetProjectId: string;
+  batchSize?: number;
+}
+
 /**
- * Separately gated production migration execution path.
- * Requires explicit authorization token and confirmed backup timestamp.
- * Strictly blocked in production without administrative sign-off.
+ * Separately gated operational migration execution process.
+ *
+ * SAFETY REQUIREMENTS FOR OPERATORS:
+ * - Destructive mutations are strictly locked by default.
+ * - Requires an uncommitted execution token set via environment variable:
+ *   process.env.MIGRATION_EXECUTION_TOKEN.
+ * - Requires a documented backup identifier and timestamp. The operator MUST
+ *   independently verify in Google Cloud Storage that a complete, valid Firestore
+ *   export was successfully generated before initiating live migration.
+ * - Requires explicit targetProjectId matching the active Firestore project.
+ * - If targeting the production project ('chat-app-28ac0'), process.env.ALLOW_PRODUCTION_MIGRATION
+ *   must be explicitly set to 'true'.
  */
 export async function executeParticipantEmailSanitization(
   firestore: admin.firestore.Firestore,
-  options: {
-    authorizationKey: string;
-    confirmedBackupDate: string;
-    batchSize?: number;
-  }
+  options: MigrationExecutionOptions
 ): Promise<MigrationAuditResult> {
-  const EXPECTED_KEY = 'EXECUTE_AUTHORIZED_MIGRATION_PROJECT_CHAT_APP_28AC0';
-
-  if (options.authorizationKey !== EXPECTED_KEY) {
-    throw new Error('MIGRATION_BLOCKED: Invalid authorization key. Migration aborted.');
+  const configuredToken = process.env.MIGRATION_EXECUTION_TOKEN;
+  if (!configuredToken || options.authorizationToken !== configuredToken) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Missing or invalid execution authorization token. Set MIGRATION_EXECUTION_TOKEN in operational environment.'
+    );
   }
 
-  if (!options.confirmedBackupDate || options.confirmedBackupDate.trim().length === 0) {
-    throw new Error('MIGRATION_BLOCKED: Must provide a confirmed pre-migration backup timestamp.');
+  if (!options.verifiedBackupId || options.verifiedBackupId.trim().length === 0) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Must provide a verified backup ID (e.g. gs://chat-app-28ac0-backups/2026-11-22).'
+    );
   }
 
-  console.log(`[Migration] Authorization confirmed. Verified backup: ${options.confirmedBackupDate}`);
+  if (!options.verifiedBackupTimestamp || isNaN(Date.parse(options.verifiedBackupTimestamp))) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Must provide a valid ISO timestamp for the verified backup.'
+    );
+  }
+
+  if (!options.targetProjectId || options.targetProjectId.trim().length === 0) {
+    throw new Error('MIGRATION_BLOCKED: Must provide targetProjectId.');
+  }
+
+  // Production safety guard: block accidental production runs
+  if (options.targetProjectId === 'chat-app-28ac0' && process.env.ALLOW_PRODUCTION_MIGRATION !== 'true') {
+    throw new Error(
+      'PRODUCTION_MIGRATION_LOCKED: Destructive migrations are disabled by default for production project "chat-app-28ac0". Requires ALLOW_PRODUCTION_MIGRATION="true".'
+    );
+  }
+
+  console.log(
+    `[Migration] Operational execution authorized. Target Project: ${options.targetProjectId}, Backup ID: ${options.verifiedBackupId}, Backup Timestamp: ${options.verifiedBackupTimestamp}`
+  );
+
   return auditLegacyParticipantEmails(firestore, {
     dryRun: false,
     batchSize: options.batchSize ?? 100,

@@ -125,4 +125,71 @@ describe('Presence Ordering & Concurrency Guard Tests (Phase 4.2 & Phase 4.3 Hig
     assert.strictEqual(committedState.isOnline, true);
     assert.strictEqual(committedState.timestamp, '2026-11-21T18:42:30.000000Z');
   });
+
+  describe('RFC 3339 Timezone Offset Normalization Tests (Section 7)', () => {
+    it('9. UTC timestamp parses correctly and preserves microseconds', () => {
+      const utcIso = '2026-11-21T18:42:15.123456Z';
+      const parsed = parseEventTimestamp(utcIso);
+
+      assert.strictEqual(parsed.isoString, utcIso);
+      assert.strictEqual(typeof parsed.millis, 'number');
+      assert.strictEqual(typeof parsed.micros, 'bigint');
+      // Microsecond part matches 123456
+      assert.strictEqual(Number(parsed.micros % 1000000n), 123456);
+    });
+
+    it('10. Same instant represented with positive timezone offset produces identical microsecond timestamp', () => {
+      // 20:42:15 in UTC+02:00 is exactly 18:42:15 UTC
+      const utcInstant = '2026-11-21T18:42:15.123456Z';
+      const positiveOffsetInstant = '2026-11-21T20:42:15.123456+02:00';
+
+      const parsedUtc = parseEventTimestamp(utcInstant);
+      const parsedPositive = parseEventTimestamp(positiveOffsetInstant);
+
+      assert.strictEqual(parsedPositive.micros, parsedUtc.micros);
+      assert.strictEqual(parsedPositive.millis, parsedUtc.millis);
+      assert.strictEqual(parsedPositive.isoString, utcInstant);
+    });
+
+    it('11. Same instant represented with negative timezone offset produces identical microsecond timestamp', () => {
+      // 13:42:15 in UTC-05:00 is exactly 18:42:15 UTC
+      const utcInstant = '2026-11-21T18:42:15.123456Z';
+      const negativeOffsetInstant = '2026-11-21T13:42:15.123456-05:00';
+
+      const parsedUtc = parseEventTimestamp(utcInstant);
+      const parsedNegative = parseEventTimestamp(negativeOffsetInstant);
+
+      assert.strictEqual(parsedNegative.micros, parsedUtc.micros);
+      assert.strictEqual(parsedNegative.millis, parsedUtc.millis);
+      assert.strictEqual(parsedNegative.isoString, utcInstant);
+    });
+
+    it('12. Fractional seconds are padded or trimmed to 6 digits (microsecond precision)', () => {
+      // 3 fractional digits -> padded to microseconds
+      const shortFrac = '2026-11-21T18:42:15.123Z';
+      const parsedShort = parseEventTimestamp(shortFrac);
+      assert.strictEqual(Number(parsedShort.micros % 1000000n), 123000);
+
+      // 9 fractional digits -> truncated to 6 digits (microseconds, without claiming nanosecond support)
+      const longFrac = '2026-11-21T18:42:15.123456789Z';
+      const parsedLong = parseEventTimestamp(longFrac);
+      assert.strictEqual(Number(parsedLong.micros % 1000000n), 123456);
+      assert.strictEqual(parsedLong.isoString, '2026-11-21T18:42:15.123456Z');
+    });
+
+    it('13. Invalid input follows documented safe behavior (throws descriptive Error)', () => {
+      assert.throws(
+        () => parseEventTimestamp('completely-invalid-date-string'),
+        /Invalid RFC 3339 \/ ISO 8601 timestamp/
+      );
+      assert.throws(
+        () => parseEventTimestamp(NaN),
+        /Invalid timestamp number/
+      );
+      assert.throws(
+        () => parseEventTimestamp(Infinity),
+        /Invalid timestamp number/
+      );
+    });
+  });
 });

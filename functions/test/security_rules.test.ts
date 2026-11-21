@@ -14,13 +14,17 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  deleteDoc,
   writeBatch,
   collection,
   serverTimestamp,
 } from 'firebase/firestore';
 import { enforceSearchRateLimit } from '../src/search_helpers';
 import { auditLegacyParticipantEmails } from '../src/migrations/dry_run_strip_participant_emails';
-import { evaluatePresenceCommit, parseEventTimestamp } from '../src/presence_helpers';
+import {
+  commitUserPresenceTransaction,
+  parseEventTimestamp,
+} from '../src/presence_helpers';
 
 const PROJECT_ID = 'chat-app-28ac0';
 
@@ -881,50 +885,43 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     await assertSucceeds(batch.commit());
   });
 
-  // 4. A valid group of 100 succeeds
-  it('27. A valid group of 100 succeeds (preserving 100-member product capacity)', async () => {
+  // 4. A valid group of 100 succeeds (exact production flow: 1 parent doc + 100 participant subdocuments in a single WriteBatch)
+  it('27. A valid group of 100 succeeds (exact production flow: parent + 100 participants in a single WriteBatch)', async () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
     const pIds: string[] = ['alice'];
     for (let i = 2; i <= 100; i++) {
       pIds.push(`user_${i}`);
     }
 
-    // Step A: Create parent conversation document
-    await assertSucceeds(
-      setDoc(doc(aliceDb, 'conversations', 'group_of_100'), {
-        type: 'group',
-        groupName: 'Century Club (100 Members)',
-        participantIds: pIds,
-        adminIds: ['alice'],
-        createdBy: 'alice',
-        createdAt: serverTimestamp(),
-      })
-    );
+    const batch = writeBatch(aliceDb);
+    const groupRef = doc(aliceDb, 'conversations', 'group_of_100_single_batch');
 
-    // Step B: Commit participant documents in batches (50 per batch, well within 500 limit)
-    const batch1 = writeBatch(aliceDb);
-    for (let i = 0; i < 50; i++) {
-      const p = pIds[i];
-      batch1.set(doc(aliceDb, 'conversations', 'group_of_100', 'participants', p), {
+    // 1 parent conversation document
+    batch.set(groupRef, {
+      type: 'group',
+      groupName: 'Century Club Single Batch (100 Members)',
+      participantIds: pIds,
+      adminIds: ['alice'],
+      createdBy: 'alice',
+      createdAt: serverTimestamp(),
+    });
+
+    // 100 participant subdocuments created in the exact same WriteBatch (101 writes total)
+    for (const p of pIds) {
+      batch.set(doc(aliceDb, 'conversations', 'group_of_100_single_batch', 'participants', p), {
         id: p,
-        name: `Member ${i + 1}`,
+        name: `Member ${p}`,
         photoUrl: null,
         isOnline: false,
       });
     }
-    await assertSucceeds(batch1.commit());
 
-    const batch2 = writeBatch(aliceDb);
-    for (let i = 50; i < 100; i++) {
-      const p = pIds[i];
-      batch2.set(doc(aliceDb, 'conversations', 'group_of_100', 'participants', p), {
-        id: p,
-        name: `Member ${i + 1}`,
-        photoUrl: null,
-        isOnline: false,
-      });
-    }
-    await assertSucceeds(batch2.commit());
+    // Verify all 101 operations commit in one single atomic WriteBatch via getAfter() evaluation
+    await assertSucceeds(batch.commit());
+
+    // Verify parent document exists
+    const groupSnap = await getDoc(groupRef);
+    assert.strictEqual(groupSnap.exists(), true);
   });
 
   // Parent group document cannot accept embedded unvalidated participant maps
@@ -1342,54 +1339,488 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     assert.strictEqual(docAfter.data()?.participants?.bob?.email, 'bob@legacy.com');
   });
 
-  // Presence Transaction Concurrency Verification against Live Firestore Emulator (Section 5)
-  it('40. Presence Transaction: concurrent transaction updates against emulator maintain monotonic order', async () => {
+  // Presence Transaction True Concurrency Verification against Live Firestore Emulator (Section 6)
+  it('40. Presence Transaction: true concurrent competing transactions against emulator maintain monotonic order', async () => {
     process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
     if (!admin.apps.length) {
       admin.initializeApp({ projectId: PROJECT_ID });
     }
     const adminDb = admin.firestore();
-    const testUserId = 'presence_concurrency_user';
+    const testUserId = 'presence_true_concurrency_user';
 
     const userRef = adminDb.collection('users').doc(testUserId);
     const publicRef = adminDb.collection('public_users').doc(testUserId);
 
-    // Initial committed state: offline at T=1000.000000Z
-    const t0 = parseEventTimestamp('2026-11-21T18:42:10.000000Z');
-    await userRef.set({ isOnline: false, presenceLastEventTimeMs: t0.millis, presenceLastEventTimeMicros: Number(t0.micros) });
-    await publicRef.set({ isOnline: false, presenceLastEventTimeMs: t0.millis, presenceLastEventTimeMicros: Number(t0.micros) });
+    // Initial committed baseline: offline at T0 (18:42:00.000000Z)
+    const t0 = parseEventTimestamp('2026-11-21T18:42:00.000000Z');
+    await userRef.set({ isOnline: false, presenceLastEventTimeMs: t0.millis, presenceLastEventTimeMicros: Number(t0.micros), presenceLastEventTimeIso: t0.isoString });
+    await publicRef.set({ isOnline: false, presenceLastEventTimeMs: t0.millis, presenceLastEventTimeMicros: Number(t0.micros), presenceLastEventTimeIso: t0.isoString });
 
-    // Two competing transitions:
-    // Event A (newer online): T=18:42:15.000500Z
-    // Event B (older offline): T=18:42:15.000100Z
-    const eventA = parseEventTimestamp('2026-11-21T18:42:15.000500Z');
-    const eventB = parseEventTimestamp('2026-11-21T18:42:15.000100Z');
+    // Test Scenario A: Concurrent contention between Newer Online (T2) and Older Offline (T1)
+    const t1Older = parseEventTimestamp('2026-11-21T18:42:10.000100Z'); // Older offline
+    const t2Newer = parseEventTimestamp('2026-11-21T18:42:10.000500Z'); // Newer online (400 micros newer)
 
-    // Run transaction for Event A
-    await adminDb.runTransaction(async (transaction) => {
-      const docSnap = await transaction.get(userRef);
-      const committedMicros = docSnap.data()?.presenceLastEventTimeMicros;
-      const dec = evaluatePresenceCommit(committedMicros, eventA);
-      if (dec.canCommit) {
-        transaction.update(userRef, { isOnline: true, presenceLastEventTimeMicros: Number(eventA.micros) });
-        transaction.update(publicRef, { isOnline: true, presenceLastEventTimeMicros: Number(eventA.micros) });
-      }
+    // Barrier mechanism to ensure both transactions begin and read the baseline before either commits
+    let readCountA = 0;
+    let barrierResolveA: () => void;
+    const barrierPromiseA = new Promise<void>((resolve) => {
+      barrierResolveA = resolve;
     });
 
-    // Run transaction for Event B (older than Event A)
-    await adminDb.runTransaction(async (transaction) => {
-      const docSnap = await transaction.get(userRef);
-      const committedMicros = docSnap.data()?.presenceLastEventTimeMicros;
-      const dec = evaluatePresenceCommit(committedMicros, eventB);
-      if (dec.canCommit) {
-        transaction.update(userRef, { isOnline: false, presenceLastEventTimeMicros: Number(eventB.micros) });
-        transaction.update(publicRef, { isOnline: false, presenceLastEventTimeMicros: Number(eventB.micros) });
+    const onBeforeCommitHookA = async () => {
+      readCountA++;
+      if (readCountA >= 2) {
+        barrierResolveA();
+      } else {
+        await barrierPromiseA;
       }
+    };
+
+    // Run both competing transactions concurrently via Promise.all using the production helper
+    await Promise.all([
+      commitUserPresenceTransaction({
+        firestore: adminDb,
+        userId: testUserId,
+        isOnline: false,
+        incomingTimestamp: t1Older,
+        onBeforeCommit: onBeforeCommitHookA,
+      }),
+      commitUserPresenceTransaction({
+        firestore: adminDb,
+        userId: testUserId,
+        isOnline: true,
+        incomingTimestamp: t2Newer,
+        onBeforeCommit: onBeforeCommitHookA,
+      }),
+    ]);
+
+    // Verify monotonic outcome: newer online state (T2) MUST win over older offline state (T1)
+    const finalUserDocA = await userRef.get();
+    const finalPublicDocA = await publicRef.get();
+
+    assert.strictEqual(finalUserDocA.data()?.isOnline, true, 'User must remain online (newer event)');
+    assert.strictEqual(finalPublicDocA.data()?.isOnline, true, 'Public user must remain online');
+    assert.strictEqual(finalUserDocA.data()?.presenceLastEventTimeMicros, Number(t2Newer.micros));
+    assert.strictEqual(finalPublicDocA.data()?.presenceLastEventTimeMicros, Number(t2Newer.micros));
+
+    // Test Scenario B: Reverse scheduling order with simultaneous start
+    // Dispatch older online (T3) vs newer offline (T4)
+    const t3Older = parseEventTimestamp('2026-11-21T18:42:20.000100Z');
+    const t4Newer = parseEventTimestamp('2026-11-21T18:42:20.000900Z');
+
+    let readCountB = 0;
+    let barrierResolveB: () => void;
+    const barrierPromiseB = new Promise<void>((resolve) => {
+      barrierResolveB = resolve;
     });
 
-    // Final state must remain online (Event A) with Event A's microsecond timestamp
-    const finalUserDoc = await userRef.get();
-    assert.strictEqual(finalUserDoc.data()?.isOnline, true);
-    assert.strictEqual(finalUserDoc.data()?.presenceLastEventTimeMicros, Number(eventA.micros));
+    const onBeforeCommitHookB = async () => {
+      readCountB++;
+      if (readCountB >= 2) {
+        barrierResolveB();
+      } else {
+        await barrierPromiseB;
+      }
+    };
+
+    await Promise.all([
+      commitUserPresenceTransaction({
+        firestore: adminDb,
+        userId: testUserId,
+        isOnline: true,
+        incomingTimestamp: t3Older,
+        onBeforeCommit: onBeforeCommitHookB,
+      }),
+      commitUserPresenceTransaction({
+        firestore: adminDb,
+        userId: testUserId,
+        isOnline: false,
+        incomingTimestamp: t4Newer,
+        onBeforeCommit: onBeforeCommitHookB,
+      }),
+    ]);
+
+    const finalUserDocB = await userRef.get();
+    const finalPublicDocB = await publicRef.get();
+
+    assert.strictEqual(finalUserDocB.data()?.isOnline, false, 'User must be offline (newer event)');
+    assert.strictEqual(finalPublicDocB.data()?.isOnline, false, 'Public user must be offline');
+    assert.strictEqual(finalUserDocB.data()?.presenceLastEventTimeMicros, Number(t4Newer.micros));
+    assert.strictEqual(finalPublicDocB.data()?.presenceLastEventTimeMicros, Number(t4Newer.micros));
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.3.1 Group Admin Authorization & Membership Invariant Tests (Section 4)
+  // --------------------------------------------------------------------------
+
+  // 1. Valid group with all administrators included in participantIds succeeds
+  it('41. A valid group with all administrators included in participantIds succeeds', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const groupRef = doc(aliceDb, 'conversations', 'group_admin_valid');
+
+    await assertSucceeds(
+      setDoc(groupRef, {
+        type: 'group',
+        groupName: 'Authorized Admin Group',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice', 'bob'], // Both admins are participants
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  // 2. Creating a group with an administrator outside participantIds fails
+  it('42. Creating a group with an administrator outside participantIds fails', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const groupRef = doc(aliceDb, 'conversations', 'group_admin_outsider');
+
+    await assertFails(
+      setDoc(groupRef, {
+        type: 'group',
+        groupName: 'Malicious Admin Group',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice', 'mallory'], // Mallory is NOT in participantIds
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  // 3. Creating a group with an empty administrator list fails
+  it('43. Creating a group with an empty administrator list fails', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const groupRef = doc(aliceDb, 'conversations', 'group_empty_admins');
+
+    await assertFails(
+      setDoc(groupRef, {
+        type: 'group',
+        groupName: 'No Admin Group',
+        participantIds: ['alice', 'bob'],
+        adminIds: [], // Empty admin list violates invariant
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  // 4. A group administrator cannot add an outsider UID to adminIds
+  it('44. A group administrator cannot add an outsider UID to adminIds during update', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_update_outsider'), {
+        type: 'group',
+        groupName: 'Update Outsider Test',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const groupRef = doc(aliceDb, 'conversations', 'group_update_outsider');
+
+    // Alice attempts to add Mallory (non-participant) to adminIds
+    await assertFails(
+      updateDoc(groupRef, {
+        adminIds: ['alice', 'mallory'],
+      })
+    );
+  });
+
+  // 5. A group administrator cannot leave a phantom administrator after removing a member
+  it('45. A group administrator cannot leave a phantom administrator after removing a member', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_phantom_admin'), {
+        type: 'group',
+        groupName: 'Phantom Admin Test',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice', 'bob'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const groupRef = doc(aliceDb, 'conversations', 'group_phantom_admin');
+
+    // Alice removes Bob from participantIds but leaves Bob in adminIds -> MUST FAIL
+    await assertFails(
+      updateDoc(groupRef, {
+        participantIds: ['alice', 'charlie'], // Bob removed from participants but remains in adminIds
+      })
+    );
+  });
+
+  // 6. A valid administrator succession succeeds
+  it('46. A valid administrator succession succeeds when new administrator is in participantIds', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_succession'), {
+        type: 'group',
+        groupName: 'Succession Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const groupRef = doc(aliceDb, 'conversations', 'group_succession');
+
+    // Alice promotes Bob (who is a valid participant) to co-administrator
+    await assertSucceeds(
+      updateDoc(groupRef, {
+        adminIds: ['alice', 'bob'],
+      })
+    );
+  });
+
+  // 7. A nonmember listed in a malicious adminIds payload cannot modify participant documents
+  it('47. A nonmember listed in a malicious adminIds payload cannot modify participant documents', async () => {
+    // Seed conversation with mallory in adminIds but NOT in participantIds
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_malicious_admin'), {
+        type: 'group',
+        groupName: 'Malicious Admin Bypass',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice', 'mallory'], // Mallory is outsider
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_malicious_admin', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Original',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const malloryDb = testEnv.authenticatedContext('mallory').firestore();
+
+    // Mallory attempts to modify Bob's participant document
+    await assertFails(
+      updateDoc(doc(malloryDb, 'conversations', 'group_malicious_admin', 'participants', 'bob'), {
+        name: 'Hacked by Mallory',
+      })
+    );
+  });
+
+  // 8. A nonmember listed in adminIds cannot delete participant documents
+  it('48. A nonmember listed in adminIds cannot delete participant documents', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_malicious_delete'), {
+        type: 'group',
+        groupName: 'Malicious Delete Test',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice', 'mallory'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_malicious_delete', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const malloryDb = testEnv.authenticatedContext('mallory').firestore();
+
+    // Mallory attempts to delete Bob's participant document
+    await assertFails(
+      deleteDoc(doc(malloryDb, 'conversations', 'group_malicious_delete', 'participants', 'bob'))
+    );
+  });
+
+  // 9. A removed member cannot update their previous participant document
+  it('49. A removed member cannot update their previous participant document', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_member'), {
+        type: 'group',
+        groupName: 'Removed Member Test',
+        participantIds: ['alice', 'charlie'], // Bob was removed
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_member', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Stale',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Bob (no longer a participant) attempts to update their old participant document
+    await assertFails(
+      updateDoc(doc(bobDb, 'conversations', 'group_removed_member', 'participants', 'bob'), {
+        name: 'Bob Unauthorized Edit',
+      })
+    );
+  });
+
+  // 10. A removed member cannot delete their previous participant document
+  it('50. A removed member cannot delete their previous participant document', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_delete'), {
+        type: 'group',
+        groupName: 'Removed Member Delete Test',
+        participantIds: ['alice', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_delete', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Stale',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Bob attempts to delete their stale participant document
+    await assertFails(
+      deleteDoc(doc(bobDb, 'conversations', 'group_removed_delete', 'participants', 'bob'))
+    );
+  });
+
+  // 11. A removed member cannot read participant subcollection documents
+  it('51. A removed member cannot read participant subcollection documents', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_read'), {
+        type: 'group',
+        groupName: 'Removed Member Read Test',
+        participantIds: ['alice', 'charlie'], // Bob not in participantIds
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_read', 'participants', 'alice'), {
+        id: 'alice',
+        name: 'Alice Private',
+        photoUrl: null,
+        isOnline: true,
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Bob attempts to read Alice's participant document in the subcollection
+    await assertFails(
+      getDoc(doc(bobDb, 'conversations', 'group_removed_read', 'participants', 'alice'))
+    );
+  });
+
+  // 12. A current member can update only permitted own display fields
+  it('52. A current member can update only permitted own display fields (name, photoUrl)', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_member_self_update'), {
+        type: 'group',
+        groupName: 'Self Update Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_member_self_update', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Initial',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Bob updates their own name and photoUrl
+    await assertSucceeds(
+      updateDoc(doc(bobDb, 'conversations', 'group_member_self_update', 'participants', 'bob'), {
+        name: 'Robert Updated',
+        photoUrl: 'https://example.com/robert.png',
+      })
+    );
+  });
+
+  // 13. A current member cannot modify document ID, email, role, provider, or server-authoritative presence fields
+  it('53. A current member cannot modify document ID, email, role, provider, or server-authoritative presence fields', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_member_tamper'), {
+        type: 'group',
+        groupName: 'Tamper Prevention Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_member_tamper', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Member',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    const bobDoc = doc(bobDb, 'conversations', 'group_member_tamper', 'participants', 'bob');
+
+    // Attempt to tamper with presence isOnline
+    await assertFails(updateDoc(bobDoc, { isOnline: true }));
+
+    // Attempt to tamper with presence lastSeen
+    await assertFails(updateDoc(bobDoc, { lastSeen: serverTimestamp() }));
+
+    // Attempt to inject email
+    await assertFails(updateDoc(bobDoc, { email: 'bob@evil.com' }));
+
+    // Attempt to inject role
+    await assertFails(updateDoc(bobDoc, { role: 'admin' }));
+
+    // Attempt to inject provider
+    await assertFails(updateDoc(bobDoc, { provider: 'google' }));
+
+    // Attempt to alter document ID field
+    await assertFails(updateDoc(bobDoc, { id: 'impersonated_id' }));
+  });
+
+  // 14. A group administrator can remove a member using the intended secure atomic operation
+  it('54. A group administrator can remove a member using the intended secure atomic operation', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_remove_member'), {
+        type: 'group',
+        groupName: 'Removal Test Team',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_remove_member', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Exiting',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Normal member (Bob) attempting to delete Alice's participant document -> MUST FAIL
+    await assertFails(
+      deleteDoc(doc(bobDb, 'conversations', 'group_admin_remove_member', 'participants', 'alice'))
+    );
+
+    // Alice atomically removes Bob from parent participantIds and deletes Bob's subcollection document
+    const batch = writeBatch(aliceDb);
+    batch.update(doc(aliceDb, 'conversations', 'group_admin_remove_member'), {
+      participantIds: ['alice', 'charlie'],
+    });
+    batch.delete(doc(aliceDb, 'conversations', 'group_admin_remove_member', 'participants', 'bob'));
+
+    await assertSucceeds(batch.commit());
   });
 });

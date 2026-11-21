@@ -1,6 +1,9 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { evaluatePresenceCommit, parseEventTimestamp } from './presence_helpers';
+import {
+  commitUserPresenceTransaction,
+  parseEventTimestamp,
+} from './presence_helpers';
 
 /**
  * Server-authoritative presence mirror from Realtime Database to Cloud Firestore.
@@ -49,58 +52,22 @@ export const onUserStatusChanged = functions
       }
     }
 
-    const userDocRef = firestore.collection('users').doc(userId);
-    const publicUserDocRef = firestore.collection('public_users').doc(userId);
-
     // 2. Atomic Firestore Transaction: read committed presence timestamp and write atomically
-    await firestore.runTransaction(async (transaction) => {
-      const [userDoc, publicUserDoc] = await Promise.all([
-        transaction.get(userDocRef),
-        transaction.get(publicUserDocRef),
-      ]);
-
-      if (!userDoc.exists && !publicUserDoc.exists) {
-        // User does not exist or has been deleted
-        return;
-      }
-
-      const userDocData = userDoc.data();
-      const publicUserDocData = publicUserDoc.data();
-
-      const userMicros = (userDocData?.presenceLastEventTimeMicros as number) || ((userDocData?.presenceLastEventTimeMs as number) || 0) * 1000;
-      const publicMicros = (publicUserDocData?.presenceLastEventTimeMicros as number) || ((publicUserDocData?.presenceLastEventTimeMs as number) || 0) * 1000;
-      const currentCommittedMicros = Math.max(userMicros, publicMicros);
-
-      const decision = evaluatePresenceCommit(currentCommittedMicros, incomingTimestamp);
-      if (!decision.canCommit) {
-        functions.logger.info(
-          `Presence: Stale event for ${userId} ignored inside transaction (${incomingTimestamp.micros} <= ${currentCommittedMicros}, reason: ${decision.reason}).`
-        );
-        return;
-      }
-
-      // Prepare updates
-      const updateData: Record<string, any> = {
-        isOnline,
-        presenceLastEventTimeMs: incomingTimestamp.millis,
-        presenceLastEventTimeMicros: Number(incomingTimestamp.micros),
-        presenceLastEventTimeIso: incomingTimestamp.isoString,
-        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-      };
-
-      if (!isOnline) {
-        updateData.lastSeen = lastSeenTimestamp;
-      }
-
-      if (userDoc.exists) {
-        transaction.update(userDocRef, updateData);
-      }
-      if (publicUserDoc.exists) {
-        transaction.update(publicUserDocRef, updateData);
-      }
+    const result = await commitUserPresenceTransaction({
+      firestore,
+      userId,
+      isOnline,
+      incomingTimestamp,
+      lastSeenTimestamp,
     });
 
-    functions.logger.info(
-      `Presence: Authoritative update completed for user ${userId}: isOnline=${isOnline}, micros=${incomingTimestamp.micros}`
-    );
+    if (result.committed) {
+      functions.logger.info(
+        `Presence: Authoritative update completed for user ${userId}: isOnline=${isOnline}, micros=${incomingTimestamp.micros}`
+      );
+    } else {
+      functions.logger.info(
+        `Presence: Event for ${userId} ignored inside transaction (${incomingTimestamp.micros}, reason: ${result.reason}).`
+      );
+    }
   });
