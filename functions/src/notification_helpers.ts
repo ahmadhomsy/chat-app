@@ -1,5 +1,6 @@
 export const FCM_MULTICAST_CHUNK_SIZE = 500;
-export const LOCK_LEASE_MS = 60000; // 60 seconds lease timeout
+export const LOCK_LEASE_MS = 120000; // 120 seconds (2 minutes) lease timeout
+export const MAX_EVENT_AGE_MS = 10 * 60 * 1000; // 10 minutes max retry window
 
 export interface TokenEntry {
   token: string;
@@ -21,6 +22,42 @@ export function classifyFcmError(errorCode: string): FcmErrorCategory {
     return 'permanent';
   }
   return 'transient';
+}
+
+/**
+ * Evaluates whether an event invocation has exceeded the maximum permissible age for retries.
+ * In Cloud Functions 1st gen event triggers, events older than MAX_EVENT_AGE_MS are dropped
+ * to prevent indefinite retry loops on permanent unrecoverable conditions.
+ */
+export function isEventExpiredForRetry(
+  eventTimestampMs: number,
+  nowMs: number = Date.now(),
+  maxAgeMs: number = MAX_EVENT_AGE_MS
+): boolean {
+  return nowMs - eventTimestampMs > maxAgeMs;
+}
+
+/**
+ * Classifies errors into retryable (transient network, FCM server, or timeouts)
+ * versus non-retryable (invalid schema, malformed payload, missing conversation).
+ */
+export function isRetryableNotificationError(error: any): boolean {
+  if (!error) return false;
+  const msg = (error.message || String(error)).toLowerCase();
+  const code = (error.code || '').toLowerCase();
+
+  // Terminal / non-retryable conditions
+  if (
+    code === 'invalid-argument' ||
+    code === 'not-found' ||
+    msg.includes('no message data') ||
+    msg.includes('parent conversation not found')
+  ) {
+    return false;
+  }
+
+  // Transient / network / server errors are retryable
+  return true;
 }
 
 /**

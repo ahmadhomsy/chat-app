@@ -21,17 +21,39 @@ interface CleanupProgress {
   updatedAt?: admin.firestore.FieldValue;
 }
 
-export const onUserDeleted = functions.auth.user().onDelete(async (user) => {
-  const uid = user.uid;
-  functions.logger.info(`Starting resilient account cleanup for user: ${uid}`);
+export const onUserDeleted = functions
+  .runWith({ failurePolicy: true, timeoutSeconds: 540, memory: '512MB' })
+  .auth.user()
+  .onDelete(async (user, context) => {
+    const uid = user.uid;
+    functions.logger.info(`Starting resilient account cleanup for user: ${uid}`);
 
-  const firestore = admin.firestore();
-  const storage = admin.storage();
-  const database = admin.database();
+    const firestore = admin.firestore();
+    const storage = admin.storage();
+    const database = admin.database();
 
-  const progressRef = firestore.collection('_cleanup_progress').doc(uid);
-  const progressDoc = await progressRef.get();
-  const progress: CleanupProgress = progressDoc.exists ? (progressDoc.data() as CleanupProgress) : {};
+    const progressRef = firestore.collection('_cleanup_progress').doc(uid);
+
+    // Guard against unbounded retries on terminal events (> 30 minutes)
+    const eventTime = context?.timestamp ? Date.parse(context.timestamp) : Date.now();
+    const eventAgeMs = Date.now() - eventTime;
+    if (eventAgeMs > 30 * 60 * 1000) {
+      functions.logger.error(
+        `Account cleanup for ${uid} exceeded max retry window (${eventAgeMs}ms). Marking terminal failure.`
+      );
+      await progressRef.set(
+        {
+          terminalError: `Exceeded max retry duration (${eventAgeMs}ms)`,
+          failedAt: admin.firestore.FieldValue.serverTimestamp(),
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+        },
+        { merge: true }
+      );
+      return;
+    }
+
+    const progressDoc = await progressRef.get();
+    const progress: CleanupProgress = progressDoc.exists ? (progressDoc.data() as CleanupProgress) : {};
 
   try {
     // ----------------------------------------------------

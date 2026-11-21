@@ -43,15 +43,32 @@ export function chunkDocuments<T>(docs: T[], chunkSize: number = FCM_TOKEN_DELET
 }
 
 /**
+ * Determines whether a Cloud Storage error represents a genuine 404 / notFound.
+ * Inspects explicit HTTP status codes, error codes, and GCS error reasons.
+ * Substring checking of error messages is strictly avoided to prevent swallowing
+ * permission, configuration, or authentication errors.
+ */
+export function isStorageNotFoundError(err: any): boolean {
+  if (!err) return false;
+  if (err.code === 404 || err.code === '404' || err.statusCode === 404) {
+    return true;
+  }
+  if (Array.isArray(err.errors) && err.errors.some((e: any) => e?.reason === 'notFound')) {
+    return true;
+  }
+  return false;
+}
+
+/**
  * Handles errors during Storage avatar deletion.
- * - Code 404 (file/folder not found) is treated as a successful no-op.
- * - Any other error is rethrown to prevent false completion and enable retry.
+ * - Genuine 404 (file/folder not found) is treated as a successful no-op.
+ * - Any other error (403, 401, 500, network, config) is rethrown to enable retry.
  */
 export function handleStorageDeletionError(err: any): void {
-  if (err?.code === 404 || err?.message?.toLowerCase().includes('not found')) {
-    // Genuine not-found is a safe, successful no-op
+  if (isStorageNotFoundError(err)) {
+    // Genuine not-found is a safe, idempotent no-op
     return;
   }
-  // All other errors (network, 500, permissions) must rethrow
+  // All other errors must rethrow
   throw err;
 }

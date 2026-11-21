@@ -139,7 +139,7 @@ npm run lint
 
 ## 🧪 Quality Assurance & Test Breakdown
 
-The test suite contains **110 automated tests** across six distinct test suites:
+The test suite contains **128 automated tests** across six distinct test suites:
 
 1. **Flutter Unit Tests (34 tests)**:
    - Auth repository error mapping and offline detection.
@@ -160,12 +160,12 @@ The test suite contains **110 automated tests** across six distinct test suites:
    - Verification that `ChatParticipantModel.toMap()` excludes participant email.
    - Legacy backward compatibility parsing optional `email` in `fromMap()`.
    - Direct and group conversation participant snapshot privacy isolation.
-5. **Cloud Functions Unit & Production Helper Tests (27 tests)**:
-   - **Account Cleanup Helpers (`cleanup_helpers.test.ts`, 9 tests)**: Token chunking ($\le 400$), conversation query limit ($\le 300 \le 500$), storage 404 vs non-404 error handling, deterministic admin succession fallback, co-admin preservation, stage tracking idempotency, retry safety.
-   - **Push Notification Helpers (`notifications_helpers.test.ts`, 11 tests)**: All-tokens success, permanent invalid token pruning, transient token retryability, multi-chunk dispatch ($\le 500$), retry filtering with `previouslySentTokens`, progress persistence errors, concurrency lease lock contention and recovery, non-premature completion checks, error code classification.
-   - **Presence Ordering Guard (`presence_helpers.test.ts`, 3 tests)**: Timestamp-based concurrency guard preventing out-of-order writes from stale events.
-   - **Search Rate Limiting & Privacy Helpers (`search_helpers.test.ts`, 4 tests)**: Atomic Firestore transaction on `_rate_limits/{callerUid}`, sliding 15 req/min window enforcement, counter reset on window expiration, strict profile sanitization excluding email and security metadata.
-6. **Firebase Emulator Integration Tests (21 tests)**:
+5. **Cloud Functions Unit & Production Helper Tests (38 tests)**:
+   - **Account Cleanup Helpers (`cleanup_helpers.test.ts`, 10 tests)**: Token chunking ($\le 400$), conversation query limit ($\le 300 \le 500$), strict 404 error classification (`isStorageNotFoundError`), non-404 error rethrow, deterministic admin succession fallback, co-admin preservation, stage tracking idempotency, retry safety, migration dry-run audit (`auditLegacyParticipantEmails`).
+   - **Push Notification Helpers (`notifications_helpers.test.ts`, 13 tests)**: All-tokens success, permanent invalid token pruning, transient token retryability, multi-chunk dispatch ($\le 500$), retry filtering with `previouslySentTokens`, progress persistence errors, concurrency lease lock contention and recovery, non-premature completion checks, error code classification, retry window bounding (`isEventExpiredForRetry`), failure retryability classification (`isRetryableNotificationError`).
+   - **Presence Ordering Guard (`presence_helpers.test.ts`, 8 tests)**: Newer connect/disconnect commits, older connect/disconnect rejected, simultaneous competing transactions, multi-device online aggregation, reconnection state restoration, deterministic equal-timestamp handling.
+   - **Search Rate Limiting & Privacy Helpers (`search_helpers.test.ts`, 7 tests)**: Strict profile sanitization, rolling 60-second window acceptance (15 reqs), 16th request rejection, expired timestamp roll-off, boundary burst prevention, atomic transaction concurrency safety, complete window reset.
+6. **Firebase Emulator Integration Tests (28 tests)**:
    - Unauthenticated access denial (Firestore, RTDB, Storage).
    - Private FCM token isolation.
    - User profile enumeration denial (`getDocs(collection('users'))` fails).
@@ -185,6 +185,14 @@ The test suite contains **110 automated tests** across six distinct test suites:
    - Deterministic direct conversation ID enforcement (`min_max`).
    - Storage attachment and RTDB presence authorization boundaries.
    - Internal metadata collections protection (`_rate_limits`, `_function_events`, `_cleanup_progress`).
+   - **Server-Enforced Participant Snapshot Privacy (Phase 4.2)**:
+     - Valid direct conversation creation with sanitized participant snapshots succeeds.
+     - Valid group conversation creation with sanitized participant snapshots succeeds.
+     - Direct conversation creation with nested participant email is rejected.
+     - Group conversation creation with nested participant email is rejected.
+     - Group administrator attempting to add email through a participant update is rejected.
+     - Attempting to inject provider, role, status, or other private metadata into participant snapshots is rejected.
+     - Valid permitted participant metadata updates continue to work.
 
 ### Run Verification Commands
 
@@ -198,11 +206,11 @@ flutter analyze --fatal-infos --fatal-warnings
 # 3. Flutter Automated Tests (62 tests)
 flutter test
 
-# 4. Cloud Functions Build, Lint & Unit Tests (27 tests)
+# 4. Cloud Functions Build, Lint & Unit Tests (38 tests)
 cd functions && npm run build && npm run lint && npm test && cd ..
 
-# 5. Firebase Security Rules Tests against Live Emulators (21 tests)
-cd functions && npx firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
+# 5. Firebase Security Rules Tests against Live Emulators (28 tests)
+cd functions && firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
 ```
 
 ---
@@ -214,14 +222,17 @@ Firestore TTL policies are defined in `firestore.indexes.json` using `fieldOverr
 - `_rate_limits.expiresAt` (collection-group)
 
 ### Production CLI Activation
-When operational deployment is authorized, run:
+When operational deployment is authorized, execute:
 ```bash
-gcloud firestore fields ttls update expiresAt --collection-group=_function_events
-gcloud firestore fields ttls update expiresAt --collection-group=_rate_limits
+gcloud firestore fields ttls update expiresAt --collection-group=_function_events --enable-ttl --project=chat-app-28ac0
+gcloud firestore fields ttls update expiresAt --collection-group=_rate_limits --enable-ttl --project=chat-app-28ac0
 ```
 
-> [!NOTE]
-> TTL policies are configured in the repository's `firestore.indexes.json`, but in accordance with governance rules, live cloud deployment to `chat-app-28ac0` has not been performed.
+> [!IMPORTANT]
+> **TTL Lifecycle Distinction**:
+> 1. **Repository Configuration**: TTL field overrides for `_function_events` and `_rate_limits` are committed in `firestore.indexes.json`.
+> 2. **Firebase Rules & Index Deployment**: Staged for deployment via `firebase deploy --only firestore:indexes`.
+> 3. **Cloud Production Activation**: Requires the `gcloud firestore fields ttls update ... --enable-ttl` command. In strict compliance with governance rules, this has **not** been executed against production project `chat-app-28ac0`.
 
 ---
 

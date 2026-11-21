@@ -759,4 +759,176 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     await assertFails(getDoc(doc(aliceDb, '_cleanup_progress', 'alice')));
     await assertFails(setDoc(doc(aliceDb, '_cleanup_progress', 'alice'), { completed: true }));
   });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.2 New Regression Tests: Server-Enforced Participant Snapshot Privacy
+  // --------------------------------------------------------------------------
+  it('22. Valid direct conversation creation with sanitized participant snapshots succeeds', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Deterministic ID for ['alice', 'dave'] is 'alice_dave'
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'alice_dave'), {
+        type: 'direct',
+        participantIds: ['alice', 'dave'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice', photoUrl: 'https://example.com/a.png', isOnline: false },
+          dave: { id: 'dave', name: 'Dave', photoUrl: null, isOnline: false },
+        },
+      })
+    );
+  });
+
+  it('23. Valid group conversation creation with sanitized participant snapshots succeeds', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'group_valid_1'), {
+        type: 'group',
+        groupName: 'Mobile Developers',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice' },
+          bob: { id: 'bob', name: 'Bob' },
+          charlie: { id: 'charlie', name: 'Charlie' },
+        },
+      })
+    );
+  });
+
+  it('24. Direct conversation creation with nested participant email is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Deterministic ID 'alice_eva' with leaked email
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_eva'), {
+        type: 'direct',
+        participantIds: ['alice', 'eva'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice', email: 'alice@leak.com' },
+          eva: { id: 'eva', name: 'Eva' },
+        },
+      })
+    );
+  });
+
+  it('25. Group conversation creation with nested participant email is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice attempts to create group with member email embedded
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_leaked_email'), {
+        type: 'group',
+        groupName: 'Secret Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice' },
+          bob: { id: 'bob', name: 'Bob', email: 'bob.private@domain.com' },
+        },
+      })
+    );
+  });
+
+  it('26. Group administrator attempting to add email through a participant update is rejected', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_target'), {
+        type: 'group',
+        groupName: 'Core Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice' },
+          bob: { id: 'bob', name: 'Bob' },
+        },
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice (admin) attempts to update Bob's participant snapshot with an email
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_admin_target'), {
+        'participants.bob.email': 'bob.injected@evil.com',
+      })
+    );
+  });
+
+  it('27. Attempting to inject provider, role, status, or other private metadata is rejected', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_sec_target'), {
+        type: 'group',
+        groupName: 'Security Target',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice' },
+          bob: { id: 'bob', name: 'Bob' },
+        },
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Attempting to inject role
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_sec_target'), {
+        'participants.bob.role': 'superadmin',
+      })
+    );
+
+    // Attempting to inject provider
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_sec_target'), {
+        'participants.bob.provider': 'google',
+      })
+    );
+
+    // Attempting to inject arbitrary unlisted keys
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_sec_target'), {
+        'participants.bob.privilege': 'root',
+      })
+    );
+  });
+
+  it('28. Valid permitted participant metadata updates continue to work', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_valid_update'), {
+        type: 'group',
+        groupName: 'Valid Updates Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice' },
+          bob: { id: 'bob', name: 'Bob' },
+        },
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Valid update: admin updates Bob's name or photoUrl
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'group_valid_update'), {
+        'participants.bob.name': 'Robert',
+        'participants.bob.photoUrl': 'https://example.com/robert.png',
+      })
+    );
+  });
 });

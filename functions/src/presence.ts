@@ -1,105 +1,100 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { shouldProcessPresenceEvent } from './presence_helpers';
+import { evaluatePresenceCommit } from './presence_helpers';
 
 /**
  * Server-authoritative presence mirror from Realtime Database to Cloud Firestore.
  *
- * Concurrency & Ordering Architecture:
+ * Concurrency & Ordering Architecture (Phase 4.2):
  * - Realtime Database is the sole source of truth for active client connections.
  * - Each client device registers under `/status/{userId}/connections/{deviceId}` with onDisconnect().remove().
  * - When connections change, this function inspects the live connection node.
- * - Out-of-order race conditions are guarded by comparing the trigger's `context.timestamp`
- *   against `presenceLastEventTimeMs` stored in Firestore. If a newer transition has already
- *   been committed, stale executions abort cleanly.
+ * - Out-of-order race conditions are guarded by an ATOMIC Firestore transaction reading
+ *   `presenceLastEventTimeMs` from `/users/{userId}` and `/public_users/{userId}`.
+ * - Only strictly newer events (`eventTimeMs > committedLastEventTimeMs`) commit.
+ *   Older and equal timestamps abort inside the transaction, guaranteeing that concurrent
+ *   or out-of-order executions cannot overwrite fresher presence state.
  * - If 1+ connections exist -> mirrors `isOnline: true` to `/users/{userId}` and `/public_users/{userId}`.
  * - If 0 connections exist -> mirrors `isOnline: false` and the authoritative RTDB `lastSeen` timestamp.
  * - Clients never directly write `isOnline` or `lastSeen` to Firestore (forbidden by Security Rules).
  */
-export const onUserStatusChanged = functions.database
-  .ref('/status/{userId}/connections')
+export const onUserStatusChanged = functions
+  .runWith({ failurePolicy: true, timeoutSeconds: 60, memory: '256MB' })
+  .database.ref('/status/{userId}/connections')
   .onWrite(async (change, context) => {
     const { userId } = context.params;
-    const eventTimeMs = context.timestamp ? new Date(context.timestamp).getTime() : Date.now();
+    const nowMs = Date.now();
+    const eventTimeMs = context.timestamp ? new Date(context.timestamp).getTime() : nowMs;
+
+    // Drop events older than 5 minutes to avoid obsolete updates
+    if (nowMs - eventTimeMs > 5 * 60 * 1000) {
+      functions.logger.warn(`Dropping stale presence event for user ${userId} (${nowMs - eventTimeMs}ms old).`);
+      return;
+    }
+
     const firestore = admin.firestore();
     const rtdb = admin.database();
 
-    try {
-      const userDocRef = firestore.collection('users').doc(userId);
-      const publicUserDocRef = firestore.collection('public_users').doc(userId);
+    // 1. Fetch fresh authoritative state from RTDB (RTDB is sole source of truth)
+    const liveConnectionsSnapshot = await rtdb.ref(`status/${userId}/connections`).once('value');
+    const isOnline = liveConnectionsSnapshot.exists() && liveConnectionsSnapshot.numChildren() > 0;
 
+    let lastSeenTimestamp: admin.firestore.Timestamp | admin.firestore.FieldValue = admin.firestore.FieldValue.serverTimestamp();
+    if (!isOnline) {
+      const lastSeenSnapshot = await rtdb.ref(`status/${userId}/lastSeen`).once('value');
+      const lastSeenVal = lastSeenSnapshot.val();
+      if (typeof lastSeenVal === 'number') {
+        lastSeenTimestamp = admin.firestore.Timestamp.fromMillis(lastSeenVal);
+      }
+    }
+
+    const userDocRef = firestore.collection('users').doc(userId);
+    const publicUserDocRef = firestore.collection('public_users').doc(userId);
+
+    // 2. Atomic Firestore Transaction: read committed presence timestamp and write atomically
+    await firestore.runTransaction(async (transaction) => {
       const [userDoc, publicUserDoc] = await Promise.all([
-        userDocRef.get(),
-        publicUserDocRef.get(),
+        transaction.get(userDocRef),
+        transaction.get(publicUserDocRef),
       ]);
 
       if (!userDoc.exists && !publicUserDoc.exists) {
-        // User may have been deleted; no-op
+        // User does not exist or has been deleted
         return;
       }
 
-      // Check version / ordering guard to prevent stale updates from overwriting newer transitions
       const userLastTime = (userDoc.data()?.presenceLastEventTimeMs as number) || 0;
       const publicLastTime = (publicUserDoc.data()?.presenceLastEventTimeMs as number) || 0;
       const currentCommittedTime = Math.max(userLastTime, publicLastTime);
 
-      if (!shouldProcessPresenceEvent(currentCommittedTime, eventTimeMs)) {
+      const decision = evaluatePresenceCommit(currentCommittedTime, eventTimeMs);
+      if (!decision.canCommit) {
         functions.logger.info(
-          `Stale presence event for user ${userId} discarded (${eventTimeMs} < ${currentCommittedTime}).`
+          `Presence: Stale event for ${userId} ignored inside transaction (${eventTimeMs} <= ${currentCommittedTime}, reason: ${decision.reason}).`
         );
         return;
       }
 
-      // Fetch fresh live state from RTDB
-      const liveConnectionsSnapshot = await rtdb.ref(`status/${userId}/connections`).once('value');
-      const isOnline = liveConnectionsSnapshot.exists() && liveConnectionsSnapshot.numChildren() > 0;
+      // Prepare updates
+      const updateData: Record<string, any> = {
+        isOnline,
+        presenceLastEventTimeMs: eventTimeMs,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      };
 
-      const batch = firestore.batch();
-
-      if (isOnline) {
-        const onlineUpdate = {
-          isOnline: true,
-          presenceLastEventTimeMs: eventTimeMs,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        };
-
-        if (userDoc.exists) {
-          batch.update(userDocRef, onlineUpdate);
-        }
-        if (publicUserDoc.exists) {
-          batch.update(publicUserDocRef, onlineUpdate);
-        }
-
-        await batch.commit();
-        functions.logger.info(`Presence: User ${userId} is now ONLINE (${liveConnectionsSnapshot.numChildren()} active device(s)).`);
-      } else {
-        // Fetch authoritative lastSeen timestamp from RTDB
-        const lastSeenSnapshot = await rtdb.ref(`status/${userId}/lastSeen`).once('value');
-        const lastSeenVal = lastSeenSnapshot.val();
-
-        const lastSeenDate = typeof lastSeenVal === 'number'
-          ? admin.firestore.Timestamp.fromMillis(lastSeenVal)
-          : admin.firestore.FieldValue.serverTimestamp();
-
-        const offlineUpdate = {
-          isOnline: false,
-          lastSeen: lastSeenDate,
-          presenceLastEventTimeMs: eventTimeMs,
-          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
-        };
-
-        if (userDoc.exists) {
-          batch.update(userDocRef, offlineUpdate);
-        }
-        if (publicUserDoc.exists) {
-          batch.update(publicUserDocRef, offlineUpdate);
-        }
-
-        await batch.commit();
-        functions.logger.info(`Presence: User ${userId} is now OFFLINE (all devices disconnected).`);
+      if (!isOnline) {
+        updateData.lastSeen = lastSeenTimestamp;
       }
-    } catch (error) {
-      functions.logger.error(`Error synchronizing presence for user ${userId}:`, error);
-      throw error;
-    }
+
+      if (userDoc.exists) {
+        transaction.update(userDocRef, updateData);
+      }
+      if (publicUserDoc.exists) {
+        transaction.update(publicUserDocRef, updateData);
+      }
+    });
+
+    functions.logger.info(
+      `Presence: Authoritative update completed for user ${userId}: isOnline=${isOnline}, eventTimeMs=${eventTimeMs}`
+    );
   });

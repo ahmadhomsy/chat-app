@@ -7,11 +7,14 @@ import {
   chunkItems,
   evaluateEventLock,
   filterTokensForDispatch,
+  isEventExpiredForRetry,
+  isRetryableNotificationError,
   processMulticastResponses,
 } from './notification_helpers';
 
-export const onNewChatMessage = functions.firestore
-  .document('conversations/{conversationId}/messages/{messageId}')
+export const onNewChatMessage = functions
+  .runWith({ failurePolicy: true, timeoutSeconds: 120, memory: '256MB' })
+  .firestore.document('conversations/{conversationId}/messages/{messageId}')
   .onCreate(async (snapshot, context) => {
     const { conversationId, messageId } = context.params;
     const eventId = context.eventId;
@@ -26,6 +29,25 @@ export const onNewChatMessage = functions.firestore
     const eventRef = firestore.collection('_function_events').doc(eventId);
     const nowMs = Date.now();
     const expiresAt = admin.firestore.Timestamp.fromMillis(nowMs + 7 * 24 * 60 * 60 * 1000); // 7-day TTL
+
+    // Guard against unbounded retry storm on terminal / stale events (> 10 minutes)
+    const eventTimeMs = context.timestamp ? new Date(context.timestamp).getTime() : nowMs;
+    if (isEventExpiredForRetry(eventTimeMs, nowMs)) {
+      functions.logger.warn(
+        `Event ${eventId} exceeded max retry window (${nowMs - eventTimeMs}ms). Marking terminal and aborting.`
+      );
+      await eventRef.set(
+        {
+          state: 'failed',
+          error: `Terminal failure: exceeded max retry window of 10 minutes`,
+          terminal: true,
+          updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+          expiresAt,
+        },
+        { merge: true }
+      );
+      return;
+    }
 
     // 1. Concurrency Guard & Lock Lease
     let previouslySentTokens: string[] = [];
@@ -202,10 +224,11 @@ export const onNewChatMessage = functions.firestore
         allInvalidDocRefs.push(...chunkResults.invalidDocRefsToDelete);
         allTransientErrors.push(...chunkResults.transientFailures);
 
-        // Persist successful delivery progress before proceeding
+        // Persist successful delivery progress and renew lock lease heartbeat
         await eventRef.update({
           sentTokens: currentSentTokens,
           failedTokens: currentFailedTokens,
+          lockedAt: admin.firestore.FieldValue.serverTimestamp(),
           updatedAt: admin.firestore.FieldValue.serverTimestamp(),
         });
       }
@@ -251,6 +274,10 @@ export const onNewChatMessage = functions.firestore
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       });
 
-      throw err;
+      if (isRetryableNotificationError(err)) {
+        throw err;
+      } else {
+        functions.logger.warn(`Terminal non-retryable error for event ${eventId}. Not retrying: ${err?.message}`);
+      }
     }
   });

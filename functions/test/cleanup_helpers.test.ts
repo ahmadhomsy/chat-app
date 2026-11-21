@@ -43,32 +43,58 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
   });
 
   it('3. Storage deletion: genuine 404 (not found) is treated as successful no-op', () => {
-    const err404 = { code: 404, message: 'Not Found' };
+    // Numeric code 404
     assert.doesNotThrow(() => {
-      handleStorageDeletionError(err404);
+      handleStorageDeletionError({ code: 404, message: 'Not Found' });
     });
 
-    const errNotFoundMsg = { message: 'The specified key does not exist (not found).' };
+    // String code '404'
     assert.doesNotThrow(() => {
-      handleStorageDeletionError(errNotFoundMsg);
+      handleStorageDeletionError({ code: '404', message: 'Not Found' });
+    });
+
+    // HTTP statusCode 404
+    assert.doesNotThrow(() => {
+      handleStorageDeletionError({ statusCode: 404, message: 'Not Found' });
+    });
+
+    // GCS error reason 'notFound'
+    assert.doesNotThrow(() => {
+      handleStorageDeletionError({ errors: [{ reason: 'notFound', message: 'File not found' }] });
     });
   });
 
-  it('4. Storage deletion: transient non-404 error rethrows to prevent false completion', () => {
-    const err500 = { code: 503, message: 'Storage backend unavailable' };
+  it('4. Storage deletion: non-404 errors (including messages with substring "not found") are rethrown', () => {
+    // Storage backend unavailable (503)
     assert.throws(
       () => {
-        handleStorageDeletionError(err500);
+        handleStorageDeletionError({ code: 503, message: 'Storage backend unavailable' });
       },
       (err: any) => err.code === 503
     );
 
-    const errPermission = { code: 403, message: 'Permission denied' };
+    // Permission denied (403)
     assert.throws(
       () => {
-        handleStorageDeletionError(errPermission);
+        handleStorageDeletionError({ code: 403, message: 'Permission denied' });
       },
       (err: any) => err.code === 403
+    );
+
+    // Critical: error message with "not found" but non-404 code must NOT be swallowed!
+    assert.throws(
+      () => {
+        handleStorageDeletionError({ code: 401, message: 'Service account credentials not found' });
+      },
+      (err: any) => err.code === 401
+    );
+
+    // Generic error with "not found" in message must NOT be swallowed
+    assert.throws(
+      () => {
+        handleStorageDeletionError(new Error('Network route not found to storage host'));
+      },
+      (err: any) => err.message.includes('Network route not found')
     );
   });
 
@@ -140,5 +166,53 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
     ].filter(Boolean);
 
     assert.strictEqual(pendingStages.length, 0);
+  });
+
+  it('10. Migration dry-run: auditLegacyParticipantEmails detects legacy email snapshots without mutating in dry-run', async () => {
+    const mockDocs = [
+      {
+        id: 'conv_clean',
+        data: () => ({
+          participants: {
+            alice: { id: 'alice', name: 'Alice' },
+            bob: { id: 'bob', name: 'Bob' },
+          },
+        }),
+        ref: { update: async () => assert.fail('Dry run must not call update!') },
+      },
+      {
+        id: 'conv_leaked',
+        data: () => ({
+          participants: {
+            alice: { id: 'alice', name: 'Alice', email: 'alice@legacy.com' },
+            bob: { id: 'bob', name: 'Bob', email: 'bob@legacy.com' },
+          },
+        }),
+        ref: { update: async () => assert.fail('Dry run must not call update!') },
+      },
+    ];
+
+    const mockFirestore: any = {
+      collection: () => ({
+        orderBy: () => ({
+          limit: () => ({
+            get: async () => ({
+              empty: false,
+              docs: mockDocs,
+              size: mockDocs.length,
+            }),
+          }),
+        }),
+      }),
+    };
+
+    const { auditLegacyParticipantEmails } = await import('../src/migrations/dry_run_strip_participant_emails');
+    const result = await auditLegacyParticipantEmails(mockFirestore, { dryRun: true });
+
+    assert.strictEqual(result.totalScanned, 2);
+    assert.strictEqual(result.conversationsWithEmail, 1);
+    assert.strictEqual(result.totalEmailsFound, 2);
+    assert.deepStrictEqual(result.sampleAffectedConversationIds, ['conv_leaked']);
+    assert.strictEqual(result.dryRun, true);
   });
 });

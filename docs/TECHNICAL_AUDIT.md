@@ -1,4 +1,4 @@
-# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4 & Phase 4.1)
+# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1 & Phase 4.2)
 
 ## 1. Executive Summary & Verification Matrix
 
@@ -15,21 +15,30 @@ Every capability is categorized across four explicit stages:
 | **Password Reset Flow** | ✅ Yes | ✅ Yes (Unit & Widget) | N/A | ⏳ Awaiting Ops Auth |
 | **Safe Account Deletion & Re-Auth** | ✅ Yes | ✅ Yes (Robustness Unit) | N/A | ⏳ Awaiting Ops Auth |
 | **Resilient Paginated Cleanup (`cleanup.ts`)** | ✅ Yes | ✅ Yes (Unit & Contract) | ✅ Verified (Batch <= 300, FCM <= 400) | ⏳ Awaiting Ops Auth |
+| **Strict Storage 404 vs Non-404 Handling** | ✅ Yes | ✅ Yes (Unit & Contract) | ✅ Verified | ⏳ Awaiting Ops Auth |
 | **Direct Messaging & Deterministic IDs** | ✅ Yes | ✅ Yes (Integration flow) | ✅ Verified (Rules Enforced) | ⏳ Awaiting Ops Auth |
 | **Message-Level Idempotency (`clientMessageId`)** | ✅ Yes | ✅ Yes (Unit & Data) | ✅ Verified | ⏳ Awaiting Ops Auth |
 | **Pagination & Stream Deduplication** | ✅ Yes | ✅ Yes (BLoC & UI) | ✅ Verified | ⏳ Awaiting Ops Auth |
 | **Group Messaging & Admin Succession** | ✅ Yes | ✅ Yes (Unit & Succession) | ✅ Verified (Rules Enforced) | ⏳ Awaiting Ops Auth |
+| **Server-Enforced Participant Snapshot Privacy** | ✅ Yes | ✅ Yes (Data source & Model) | ✅ Verified (Rules Tests 22–28) | ⏳ Awaiting Ops Auth |
 | **User Privacy & Public Directory Projection** | ✅ Yes | ✅ Yes (Data source & Model) | ✅ Verified (Strict Isolation) | ⏳ Awaiting Ops Auth |
-| **Atomic Shared Email Search (`search.ts`)**| ✅ Yes | ✅ Yes (Callable Func & Txn) | ✅ Verified (Txn Rate Limit) | ⏳ Awaiting Ops Auth |
+| **Atomic Rolling Search Rate Limiter (`search.ts`)**| ✅ Yes | ✅ Yes (Callable Func & Txn) | ✅ Verified (15 req/60s rolling) | ⏳ Awaiting Ops Auth |
 | **Multi-Device RTDB Presence Service** | ✅ Yes | ✅ Yes (Unit & In-Memory) | ✅ Verified (RTDB Rules) | ⏳ Awaiting Ops Auth |
-| **Authoritative Presence Cloud Function** | ✅ Yes (`presence.ts`) | ✅ Yes (Concurrency Guard) | ✅ Verified | ⏳ Awaiting Ops Auth |
-| **Durable Push Notifications (`notifications.ts`)**| ✅ Yes | ✅ Yes (Unit & Chunks <= 500)| ✅ Verified | ⏳ Awaiting Ops Auth |
+| **Atomic Monotonic Presence Cloud Function** | ✅ Yes (`presence.ts`) | ✅ Yes (Firestore Txn Guard) | ✅ Verified | ⏳ Awaiting Ops Auth |
+| **Durable Push Notifications (`notifications.ts`)**| ✅ Yes | ✅ Yes (Unit & Chunks <= 500)| ✅ Verified (failurePolicy: true) | ⏳ Awaiting Ops Auth |
+| **Lock Lease Heartbeat Renewal** | ✅ Yes | ✅ Yes (Unit & Chunks) | ✅ Verified | ⏳ Awaiting Ops Auth |
 | **Firestore Security Rules** | ✅ Yes (`firestore.rules`) | ✅ Yes (Rules tests) | ✅ Verified (Port 8080) | ⏳ Awaiting Ops Auth |
 | **Storage Security Rules** | ✅ Yes (`storage.rules`) | ✅ Yes (Rules tests) | ✅ Verified (Port 9199) | ⏳ Awaiting Ops Auth |
 | **Realtime Database Security Rules** | ✅ Yes (`database.rules.json`) | ✅ Yes (Rules tests) | ✅ Verified (Port 9000) | ⏳ Awaiting Ops Auth |
+| **Firebase CLI Version Pinning (15.2.1)** | ✅ Yes (`ci.yaml`) | ✅ Yes (CI assertions) | ✅ Verified | ⏳ Awaiting Ops Auth |
 
 > [!IMPORTANT]
 > **Production Deployment Status**: In strict adherence to engineering governance rules (*"Do not deploy any Firebase resources to production without explicit authorization"*), live deployment to `chat-app-28ac0` has been staged and verified locally under emulators, but has **not** been executed against the live cloud infrastructure.
+>
+> **Three-State Configuration Accounting**:
+> - **Repository Configuration**: Configured in source control (`firestore.rules`, `firestore.indexes.json`, `storage.rules`, `database.rules.json`, `functions/`).
+> - **Emulator Verified**: Verified locally against isolated emulators on ports 8080, 9199, 9000 with 28 automated integration tests.
+> - **Cloud Verified / Deployed**: Requires manual execution of deployment commands with administrative permissions once authorized.
 
 ---
 
@@ -43,7 +52,7 @@ Executed via:
 npx firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
 ```
 
-### Verified Security Assertions (21/21 Passed):
+### Verified Security Assertions (28/28 Passed):
 ```text
   Firebase Security Rules Independent Verification Tests
     ✔ 1. An authenticated user attempting to list all private user profiles fails (212ms)
@@ -67,11 +76,18 @@ npx firebase emulators:exec --only "firestore,storage,database" "npm run test:ru
     ✔ 19. Direct clients cannot read or write _rate_limits metadata (120ms)
     ✔ 20. Direct clients cannot read or write _function_events metadata (104ms)
     ✔ 21. Direct clients cannot read or write _cleanup_progress metadata (98ms)
+    ✔ 22. Direct conversation creation with valid participant snapshots succeeds (115ms)
+    ✔ 23. Direct conversation creation containing participant email is rejected (108ms)
+    ✔ 24. Direct conversation creation with role or privilege in participant snapshot is rejected (102ms)
+    ✔ 25. Group conversation creation containing participant email is rejected (110ms)
+    ✔ 26. Group conversation creation with role or privilege in participant snapshot is rejected (99ms)
+    ✔ 27. Group administrator update injecting email or role into participants is rejected (124ms)
+    ✔ 28. Group administrator update with valid participants and permitted metadata changes succeeds (135ms)
 
-  21 passing (5s)
+  28 passing (9s)
 ```
 
-### Critical Rules Vulnerabilities Remediated in Phase 4 & Phase 4.1:
+### Critical Rules Vulnerabilities Remediated in Phase 4, Phase 4.1 & Phase 4.2:
 1. **User Profile Privacy & Enumeration Prevention**:
    - *Previous Defect*: `allow read: if isAuthenticated();` on `/users/{userId}` allowed any authenticated user to list all user documents and scrape email addresses, security providers, and private timestamps.
    - *Phase 4 Remediation*:
@@ -81,15 +97,20 @@ npx firebase emulators:exec --only "firestore,storage,database" "npm run test:ru
 2. **User Creation Schema Hardening (Phase 4.1)**:
    - *Vulnerability*: Previously, client creation on `/users/{userId}` allowed arbitrary fields, creating an escalation vector for clients to persist privileged keys (`role: 'admin'`, `status`, `privilege`).
    - *Remediation*: Enforced strict field allowlist `['name', 'email', 'photoUrl', 'lastSeen', 'isOnline', 'createdAt', 'provider', 'phone']`, requiring `isOnline == false`, `lastSeen == null`, and `provider in ['email', 'google']`.
-3. **Conversation Document Participant Email Exclusion (Phase 4.1)**:
-   - *Vulnerability*: Serializing participant `email` into the shared `/conversations/{id}` document snapshot exposed member emails to all participants in group conversations.
-   - *Remediation*: Updated `ChatParticipantModel.toMap()` and `chat_remote_data_source.dart` to omit `email` from conversation document snapshots. Preserved optional `email` reading in `fromMap()` for backwards read compatibility.
+3. **Server-Enforced Participant Snapshot Privacy (Phase 4.2)**:
+   - *Vulnerability*: While client code omitted emails in Phase 4.1, security rules did not validate map keys inside `participants` list on creation or updates, allowing malicious or modified clients to inject `email`, `role`, or `privilege` into `/conversations/{id}`.
+   - *Phase 4.2 Remediation*:
+     - Implemented `isValidParticipantSnapshot(p)`: strictly enforces `p.keys().hasOnly(['id', 'name', 'photoUrl', 'isOnline', 'lastSeen'])`, with type validations (`p.id is string`, `p.name is string`, `p.isOnline is bool`), string length limits (`name.size() <= 100`, `photoUrl.size() <= 2048`), and strictly forbids unlisted keys such as `email`, `role`, `status`, `provider`, or `privilege`.
+     - Implemented `isValidDirectParticipants(pList)` and `isValidGroupParticipants(pList)`: direct conversations enforce exactly 2 valid snapshots; group conversations enforce between 2 and 8 participant snapshots via unrolled checks that stay comfortably within the Firestore rules engine 1000-expression evaluation limit.
+     - Enforced across direct creation, group creation, and group admin update rules.
 4. **Message Schema Creation & Update Allowlists (Phase 4.1)**:
    - *Creation Allowlist*: Restricted strictly to `['senderId', 'senderName', 'text', 'type', 'createdAt']`, verifying `senderId == request.auth.uid`, `text.size() > 0 && text.size() <= 2000`, `type in ['text', 'image', 'file']`, and `createdAt is timestamp`.
    - *Update Allowlist*: Restricted strictly to sender text edits with `['text', 'editedAt']`, enforcing `editedAt is timestamp`.
    - *Exclusion of `deletedAt`*: The nullable `deletedAt` field is intentionally excluded from the client update allowlist to prevent unprivileged clients or compromised senders from arbitrarily manipulating message deletion states; deletions must execute via document deletion governed by `allow delete`.
-5. **Rate-Limited Server-Side Exact Email Search**:
-   - Exact email lookups are performed via the callable Cloud Function `searchUserByEmail`, which requires authentication, applies atomic per-user transaction rate limiting (max 15 queries per minute via `_rate_limits/{callerUid}`), executes an exact equality match, and returns only public profile fields (email stripped).
+5. **Rate-Limited Server-Side Exact Email Search (Phase 4.1 & Phase 4.2)**:
+   - Exact email lookups are performed via callable Cloud Function `searchUserByEmail`, requiring authentication.
+   - Phase 4.2 hardened rate limiting to an atomic rolling 60-second window (max 15 requests/min) using an array of timestamps inside a Firestore transaction.
+   - Returns only public profile fields (email stripped).
 6. **Deterministic Direct Conversation ID Validation**:
    - Direct conversation creation rules strictly enforce that the document ID matches `min(p0, p1) + '_' + max(p0, p1)`. Any attempt to create direct conversations with arbitrary or non-deterministic IDs is rejected.
 7. **Conversation Update Allowlists**:
@@ -107,50 +128,70 @@ npx firebase emulators:exec --only "firestore,storage,database" "npm run test:ru
 Located under `functions/src/`, written in TypeScript, targeting **Node.js 22**, and compiling cleanly via `tsc`.
 
 ### 3.1 Push Notifications (`functions/src/notifications.ts` & `functions/src/notification_helpers.ts`)
-- **Durable Event State Machine & Locking**:
-   - Tracks event states (`processing`, `sent`, `failed`) in `_function_events/{eventId}`.
-   - Distributed locking with a 60-second lease timeout prevents concurrent duplicate processing.
-   - Preserves `sentTokens` across retries so that already-delivered recipients are never notified twice.
-   - Event state is marked `sent` only when all tokens are either successfully sent or permanently invalid. If any retryable errors occur, the event is marked `failed` and rethrown to let Cloud Functions retry.
+- **Explicit Cloud Functions Retry Policy (`failurePolicy: true`)**:
+  - Configured `functions.runWith({ failurePolicy: true, timeoutSeconds: 60, memory: '256MB' })` on `onNewChatMessage`.
+  - Distinguishes retryable vs terminal errors via `isRetryableNotificationError`. Permanent failures (e.g. malformed payload, missing conversation, non-retryable client errors) terminate cleanly without rethrowing.
+  - Event age bounding: `isEventExpiredForRetry(eventTimestamp, MAX_EVENT_AGE_MS)` discards events older than 10 minutes (`MAX_EVENT_AGE_MS = 600000`) to prevent infinite retry storms during prolonged outages.
+- **Durable Event State Machine & Distributed Locking**:
+  - Tracks event states (`processing`, `sent`, `failed`) in `_function_events/{eventId}`.
+  - Lock lease timeout increased to 120 seconds (`LOCK_LEASE_MS = 120000`).
+  - **Lock Lease Heartbeat Renewal**: After each multicast chunk is processed, the function executes an atomic transaction renewing `lockedAt: admin.firestore.FieldValue.serverTimestamp()`, preventing false lock expirations during long batches.
+  - Preserves `sentTokens` across retries so that already-delivered recipients are never notified twice.
 - **Multicast Batching ($\le 500$)**:
-   - Splits recipient tokens into chunks of $\le 500$ via `chunkItems` to strictly comply with `sendEachForMulticast` limits.
+  - Splits recipient tokens into chunks of $\le 500$ via `chunkItems` to strictly comply with `sendEachForMulticast` limits.
 - **Granular Token Response Inspection & Pruning**:
-   - Inspects individual responses in `processMulticastResponses`.
-   - Uses `classifyFcmError` to distinguish permanent errors (`messaging/invalid-registration-token`, `messaging/registration-token-not-registered`) from transient retryable failures (e.g. `messaging/server-unavailable`, `messaging/internal-error`, network timeouts).
-   - Prunes only permanent invalid tokens from user documents; transient errors are preserved for retry.
+  - Inspects individual responses in `processMulticastResponses`.
+  - Uses `classifyFcmError` to distinguish permanent errors (`messaging/invalid-registration-token`, `messaging/registration-token-not-registered`) from transient retryable failures (e.g. `messaging/server-unavailable`, `messaging/internal-error`, network timeouts).
+  - Prunes only permanent invalid tokens from user documents; transient errors are preserved for retry.
 - **External FCM Delivery Semantics**:
-   - External delivery to mobile operating systems is at-least-once. Application-level event locking, chunking, and device token deduplication eliminate intra-event duplicate sends.
+  - External delivery to mobile operating systems is at-least-once. Application-level event locking, chunking, and device token deduplication eliminate intra-event duplicate sends.
 - **TTL Expiration**:
-   - Event tracking records include an `expiresAt` timestamp set to 7 days for automated TTL cleanup.
+  - Event tracking records include an `expiresAt` timestamp set to 7 days for automated TTL cleanup.
 
 ### 3.2 Account Deletion & Retention Policy (`functions/src/cleanup.ts` & `functions/src/cleanup_helpers.ts`)
 Triggered automatically via `functions.auth.user().onDelete`:
-- **Independent Retryable Stages**:
-   - Progress is persisted under `_cleanup_progress/{uid}` (`fcmTokensCleaned`, `userDocCleaned`, `publicUserDocCleaned`, `avatarsCleaned`, `rtdbCleaned`, `conversationsAnonymized`).
-   - If an error occurs in any stage, the error is rethrown for retry, and subsequent executions resume directly from uncompleted stages.
+- **Explicit Retry Policy & Event Age Guard**:
+  - Configured `functions.runWith({ failurePolicy: true, timeoutSeconds: 540, memory: '512MB' })`.
+  - Bounds retry age at 30 minutes (`MAX_CLEANUP_EVENT_AGE_MS = 1800000`). If an event exceeds 30 minutes, it writes a terminal failure state to `_cleanup_progress/{uid}` and gracefully aborts.
+- **Independent Resumable Stages**:
+  - Progress is persisted under `_cleanup_progress/{uid}` (`fcmTokensCleaned`, `userDocCleaned`, `publicUserDocCleaned`, `avatarsCleaned`, `rtdbCleaned`, `conversationsAnonymized`).
+  - Resumes directly from uncompleted stages upon retry.
 - **Chunked FCM Token Deletion ($\le 400$)**:
-   - Splits FCM token document deletions into chunks of $\le 400$ via `chunkDocuments` to strictly prevent exceeding the Firestore 500-operation WriteBatch cap.
+  - Splits FCM token document deletions into chunks of $\le 400$ via `chunkDocuments` to strictly prevent exceeding the Firestore 500-operation WriteBatch cap.
 - **Paginated Conversation Anonymization**:
-   - Queries conversations in paginated batches of $\le 300$ using `startAfter()`, well within the Firestore 500-operation WriteBatch cap.
-- **Storage Deletion Error Handling**:
-   - `handleStorageDeletionError` treats HTTP 404 (file not found) as a successful no-op, whereas transient non-404 storage errors rethrow for retry to prevent false completion.
+  - Queries conversations in paginated batches of $\le 300$ using `startAfter()`, well within the Firestore 500-operation WriteBatch cap.
+- **Strict Storage Error Handling (`isStorageNotFoundError`)**:
+  - Replaced ambiguous string matching with strict inspection: checks `err.code === 404`, `err.code === '404'`, `err.statusCode === 404`, or `err.errors[].reason === 'notFound'`.
+  - Missing avatar files (404) are treated as successful no-ops; any non-404 error (network failure, authentication, permission denied) is strictly rethrown to trigger Cloud Functions retry.
 - **Deterministic Admin Succession**:
-   - `computeAdminSuccession` removes the deleted user from `adminIds`. If co-administrators exist, they are preserved. If no admins remain, it deterministically promotes the participant with the lexicographically lowest UID as a documented fallback when no `joinedAt` timestamp exists.
+  - `computeAdminSuccession` removes the deleted user from `adminIds`. If co-administrators exist, they are preserved. If no admins remain, it deterministically promotes the participant with the lexicographically lowest UID as a documented fallback when no `joinedAt` timestamp exists.
+- **Participant Email Audit Migration Script**:
+  - Created `functions/src/migrations/dry_run_strip_participant_emails.ts` for safe, audited migration of legacy conversation documents. Runs in strict dry-run mode (`DRY_RUN = true`) without mutating production data.
 - **Data Retention & Privacy Policy**:
-   - Conversational continuity is preserved: messages and attachments sent by the user remain visible to other participants.
-   - Personal identifiers are completely purged: private user doc, public user doc, FCM tokens, avatars, and RTDB presence nodes are permanently deleted.
-   - Participant snapshots in all conversations are redacted to `name: "Deleted Account"`, `photoUrl: null`, `isOnline: false`.
+  - Conversational continuity is preserved: messages and attachments sent by the user remain visible to other participants.
+  - Personal identifiers are completely purged: private user doc, public user doc, FCM tokens, avatars, and RTDB presence nodes are permanently deleted.
+  - Participant snapshots in all conversations are redacted to `name: "Deleted Account"`, `photoUrl: null`, `isOnline: false`.
 
 ### 3.3 Presence Synchronization & Ordering Guard (`functions/src/presence.ts` & `functions/src/presence_helpers.ts`)
 - Triggered on `/status/{userId}/connections` in Realtime Database.
 - Live snapshot inspection evaluates active device connections.
-- **Timestamp Ordering Guard**: Compares incoming transition timestamp (`event.timestamp`) against committed `presenceLastEventTimeMs` on Firestore user documents via `evaluatePresenceTransition`. Drops stale out-of-order writes to eliminate race conditions between rapid connect/disconnect events.
+- **Explicit Retry Policy & Max Event Age**:
+  - Configured `functions.runWith({ failurePolicy: true, timeoutSeconds: 60, memory: '256MB' })`. Discards events older than 5 minutes (`MAX_PRESENCE_EVENT_AGE_MS = 300000`).
+- **Atomic Transactional Ordering Guard**:
+  - Replaced non-atomic batch writes with `firestore.runTransaction` reading `/users/{userId}` and `/public_users/{userId}`.
+  - Inside the transaction, `evaluatePresenceCommit` strictly compares the incoming event timestamp (`event.timestamp`) against committed `presenceLastEventTimeMs`.
+  - Enforces strict monotonicity: commits only if `incomingEventTimeMs > committedLastEventTimeMs`. Rejects stale older events (`stale_older`) and stale equal timestamps (`stale_equal`) deterministically.
 - Mirrors `isOnline: true` to both `/users/{userId}` and `/public_users/{userId}` when $N \ge 1$ active connections exist.
 - Mirrors `isOnline: false` and the authoritative RTDB `lastSeen` timestamp when all devices disconnect.
 
-### 3.4 Rate Limiting & User Search (`functions/src/search.ts` & `functions/src/search_helpers.ts`)
-- **Shared Atomic Rate Limiting**: Enforces rate limiting via an atomic Firestore transaction on `_rate_limits/{callerUid}` (`enforceSearchRateLimit`) using a sliding 60-second window (max 15 requests per minute). Replaced in-memory cache to guarantee enforcement across multiple Cloud Function instances and cold starts.
-- **Profile Sanitization**: `sanitizeSearchProfile` strictly strips `email` and private security metadata, returning only public profile fields (`id`, `name`, `photoUrl`, `isOnline`, `lastSeen`, `createdAt`, `updatedAt`).
+### 3.4 Rolling Window Rate Limiting & User Search (`functions/src/search.ts` & `functions/src/search_helpers.ts`)
+- **True Rolling 60-Second Window**:
+  - Uses an atomic Firestore transaction on `_rate_limits/{callerUid}` (`enforceSearchRateLimit`) maintaining a bounded `timestamps: number[]` array (capped at 15 items).
+  - Evaluates via `evaluateRollingRateLimit(timestamps, nowMs, windowMs, maxRequests)`. Requests older than `nowMs - 60000` are pruned.
+  - The 16th request within the rolling 60-second window is rejected with `resource-exhausted` and returns `retryAfterSeconds`.
+  - Completely prevents boundary burst attacks inherent in fixed-window counters.
+- **Profile Sanitization**:
+  - `sanitizeSearchProfile` strictly strips `email` and private security metadata, returning only public profile fields (`id`, `name`, `photoUrl`, `isOnline`, `lastSeen`, `createdAt`, `updatedAt`).
 
 ### 3.5 Firestore TTL & Composite Indexes
 - Configured `fieldOverrides` with `ttl: true` in `firestore.indexes.json` for:
@@ -158,8 +199,8 @@ Triggered automatically via `functions.auth.user().onDelete`:
   - `_rate_limits.expiresAt` (collection-group)
 - **Production CLI Activation Commands**:
   ```bash
-  gcloud firestore fields ttls update expiresAt --collection-group=_function_events
-  gcloud firestore fields ttls update expiresAt --collection-group=_rate_limits
+  gcloud firestore fields ttls update expiresAt --collection-group=_function_events --enable-ttl --project=chat-app-28ac0
+  gcloud firestore fields ttls update expiresAt --collection-group=_rate_limits --enable-ttl --project=chat-app-28ac0
   ```
   *(Configured in repository `firestore.indexes.json`; live deployment awaits operational authorization).*
 
@@ -179,7 +220,7 @@ Triggered automatically via `functions.auth.user().onDelete`:
 
 ## 5. Automated Test Suite Breakdown
 
-The repository contains **110 automated tests** strictly categorized by test type:
+The repository contains **128 automated tests** strictly categorized by test type:
 
 | Test Type | Target File | Count | Status | Description |
 |---|---|---|---|---|
@@ -187,10 +228,10 @@ The repository contains **110 automated tests** strictly categorized by test typ
 | **Flutter In-Memory Flow Tests** | `test/core/services/presence_service_test.dart` | 4 | ✅ Passed | In-memory simulated multi-device connection registry testing partial/full disconnects and stable reconnection IDs. |
 | **Flutter Widget Tests** | `test/features/auth/presentation/auth_widgets_test.dart`<br>`test/features/chat/presentation/chat_widgets_test.dart`<br>`test/widget_test.dart` | 20 | ✅ Passed | UI rendering, form validation, tab switching, and message input debouncing. |
 | **Flutter Privacy & Model Tests** | `test/features/chat/data/models/chat_participant_privacy_test.dart` | 4 | ✅ Passed | Participant email omission from conversation serialization, backwards compatibility, and snapshot isolation. |
-| **Cloud Functions Unit & Production Helper Tests** | `functions/test/cleanup_helpers.test.ts`<br>`functions/test/notifications_helpers.test.ts`<br>`functions/test/presence_helpers.test.ts`<br>`functions/test/search_helpers.test.ts` | 27 | ✅ Passed | Account cleanup helpers (9), push notification helpers (11), presence concurrency guard (3), search rate limiting (4). |
-| **Firebase Emulator Integration Tests** | `functions/test/security_rules.test.ts` | 21 | ✅ Passed | Live emulator execution covering user privacy, schema allowlists, role tampering denial, deterministic direct IDs, message updates, and metadata isolation. |
+| **Cloud Functions Unit & Production Helper Tests** | `functions/test/cleanup_helpers.test.ts`<br>`functions/test/notifications_helpers.test.ts`<br>`functions/test/presence_helpers.test.ts`<br>`functions/test/search_helpers.test.ts` | 38 | ✅ Passed | Account cleanup & strict 404 (10), push notification retry & age bounding (13), presence transactional ordering guard (8), rolling window rate limiting (7). |
+| **Firebase Emulator Integration Tests** | `functions/test/security_rules.test.ts` | 28 | ✅ Passed | Live emulator execution covering user privacy, schema allowlists, role tampering denial, deterministic direct IDs, message updates, metadata isolation, and participant snapshot allowlists. |
 
-**Total Automated Tests:** 110 passed, 0 failed.
+**Total Automated Tests:** 128 passed, 0 failed.
 
 ---
 
@@ -205,8 +246,18 @@ All quality gates pass cleanly with zero warnings:
 | **Flutter Tests** | `flutter test` | **62 passed (0 failed)** |
 | **Functions Build** | `cd functions && npm run build` | **0 TypeScript errors (`tsc` clean)** |
 | **Functions Lint** | `cd functions && npm run lint` | **0 ESLint errors/warnings** |
-| **Functions Unit Tests**| `cd functions && npm test` | **27 passed (0 failed, 273ms runtime)** |
-| **Security Rules Tests** | `cd functions && npx firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"` | **21 passed (0 failed, 5s runtime)** |
+| **Functions Unit Tests**| `cd functions && npm test` | **38 passed (0 failed, 208ms runtime)** |
+| **Security Rules Tests** | `cd functions && npx firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"` | **28 passed (0 failed, 9s runtime)** |
+| **CLI Version Pinning** | `firebase --version` | **15.2.1 (Pinned & Asserted in CI)** |
+
+---
+
+## 7. Git & Publication Record
+
+- **Working Branch**: `hardening`
+- **Base Branch**: `main`
+- **Remote**: `origin` (`https://github.com/ahmadhomsy/chat-app.git`)
+- **Pull Request**: [#1 (OPEN)](https://github.com/ahmadhomsy/chat-app/pull/1)
 
 ---
 

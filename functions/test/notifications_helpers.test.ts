@@ -5,7 +5,10 @@ import {
   chunkItems,
   processMulticastResponses,
   evaluateEventLock,
+  isEventExpiredForRetry,
+  isRetryableNotificationError,
   TokenEntry,
+  MAX_EVENT_AGE_MS,
 } from '../src/notification_helpers';
 
 describe('Push Notifications Production Helpers & Reliability Tests', () => {
@@ -184,5 +187,33 @@ describe('Push Notifications Production Helpers & Reliability Tests', () => {
     assert.strictEqual(classifyFcmError('messaging/registration-token-not-registered'), 'permanent');
     assert.strictEqual(classifyFcmError('messaging/server-unavailable'), 'transient');
     assert.strictEqual(classifyFcmError('messaging/internal-error'), 'transient');
+  });
+
+  it('12. Retry window: isEventExpiredForRetry correctly bounds retry duration to MAX_EVENT_AGE_MS', () => {
+    const now = 1700000000000;
+    // 5 minutes old -> still eligible for retry
+    assert.strictEqual(isEventExpiredForRetry(now - 5 * 60 * 1000, now, MAX_EVENT_AGE_MS), false);
+
+    // Exactly at 10 minutes -> eligible
+    assert.strictEqual(isEventExpiredForRetry(now - 10 * 60 * 1000, now, MAX_EVENT_AGE_MS), false);
+
+    // 10 minutes and 1 millisecond old -> expired, do not retry
+    assert.strictEqual(isEventExpiredForRetry(now - (10 * 60 * 1000 + 1), now, MAX_EVENT_AGE_MS), true);
+
+    // 1 hour old -> expired
+    assert.strictEqual(isEventExpiredForRetry(now - 60 * 60 * 1000, now, MAX_EVENT_AGE_MS), true);
+  });
+
+  it('13. Failure classification: distinguishes retryable transient errors from terminal errors', () => {
+    // Transient errors (retryable)
+    assert.strictEqual(isRetryableNotificationError(new Error('Transient network timeout')), true);
+    assert.strictEqual(isRetryableNotificationError({ code: 'unavailable', message: 'FCM busy' }), true);
+    assert.strictEqual(isRetryableNotificationError(new Error('ECONNRESET')), true);
+
+    // Terminal errors (non-retryable, should not trigger retry storms)
+    assert.strictEqual(isRetryableNotificationError({ code: 'invalid-argument', message: 'Bad format' }), false);
+    assert.strictEqual(isRetryableNotificationError({ code: 'not-found', message: 'User not found' }), false);
+    assert.strictEqual(isRetryableNotificationError(new Error('Parent conversation not found')), false);
+    assert.strictEqual(isRetryableNotificationError(new Error('No message data found for msg_1')), false);
   });
 });

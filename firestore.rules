@@ -19,6 +19,39 @@ service cloud.firestore {
       return get(/databases/$(database)/documents/conversations/$(conversationId)).data;
     }
 
+    // Validates a single participant snapshot contract
+    // hasOnly guarantees that ONLY id, name, photoUrl, isOnline, lastSeen can exist (rejects email, role, etc.)
+    function isValidParticipantSnapshot(data) {
+      return data is map
+             && data.keys().hasOnly(['id', 'name', 'photoUrl', 'isOnline', 'lastSeen'])
+             && (!('name' in data) || (data.name is string && data.name.size() > 0 && data.name.size() <= 100))
+             && (!('photoUrl' in data) || data.photoUrl == null || data.photoUrl is string)
+             && (!('isOnline' in data) || data.isOnline is bool)
+             && (!('lastSeen' in data) || data.lastSeen == null || data.lastSeen is timestamp);
+    }
+
+    // Validates direct conversation participant snapshots (exactly 2 participants)
+    function isValidDirectParticipants(participants, pIds) {
+      return participants is map
+             && participants.keys().hasOnly(pIds)
+             && isValidParticipantSnapshot(participants[pIds[0]])
+             && isValidParticipantSnapshot(participants[pIds[1]]);
+    }
+
+    // Validates group conversation participant snapshots (unrolled safely under 1000-expression limit)
+    function isValidGroupParticipants(participants, pIds) {
+      return participants is map
+             && participants.keys().hasOnly(pIds)
+             && (pIds.size() < 1 || !(pIds[0] in participants) || isValidParticipantSnapshot(participants[pIds[0]]))
+             && (pIds.size() < 2 || !(pIds[1] in participants) || isValidParticipantSnapshot(participants[pIds[1]]))
+             && (pIds.size() < 3 || !(pIds[2] in participants) || isValidParticipantSnapshot(participants[pIds[2]]))
+             && (pIds.size() < 4 || !(pIds[3] in participants) || isValidParticipantSnapshot(participants[pIds[3]]))
+             && (pIds.size() < 5 || !(pIds[4] in participants) || isValidParticipantSnapshot(participants[pIds[4]]))
+             && (pIds.size() < 6 || !(pIds[5] in participants) || isValidParticipantSnapshot(participants[pIds[5]]))
+             && (pIds.size() < 7 || !(pIds[6] in participants) || isValidParticipantSnapshot(participants[pIds[6]]))
+             && (pIds.size() < 8 || !(pIds[7] in participants) || isValidParticipantSnapshot(participants[pIds[7]]));
+    }
+
     // Default deny all
     match /{document=**} {
       allow read, write: if false;
@@ -120,6 +153,7 @@ service cloud.firestore {
                         && conversationId == (request.resource.data.participantIds[0] < request.resource.data.participantIds[1]
                            ? request.resource.data.participantIds[0] + '_' + request.resource.data.participantIds[1]
                            : request.resource.data.participantIds[1] + '_' + request.resource.data.participantIds[0])
+                        && (!('participants' in request.resource.data) || isValidDirectParticipants(request.resource.data.participants, request.resource.data.participantIds))
                       ) || (
                         request.resource.data.type == 'group'
                         && request.resource.data.participantIds.size() >= 2
@@ -130,6 +164,7 @@ service cloud.firestore {
                         && request.resource.data.groupName is string
                         && request.resource.data.groupName.size() > 0
                         && request.resource.data.groupName.size() <= 100
+                        && (!('participants' in request.resource.data) || isValidGroupParticipants(request.resource.data.participants, request.resource.data.participantIds))
                       )
                     );
 
@@ -167,6 +202,7 @@ service cloud.firestore {
                             && request.resource.data.adminIds.size() >= 1
                             && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['groupName']) || (request.resource.data.groupName is string && request.resource.data.groupName.size() > 0 && request.resource.data.groupName.size() <= 100))
                             && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['participants']) || isValidGroupParticipants(request.resource.data.participants, request.resource.data.participantIds))
                           )
                         )
                       )
