@@ -218,7 +218,27 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
         },
       );
 
-      await conversationDoc.set(conversationModel.toMap());
+      final batch = _firestore.batch()
+        ..set(conversationDoc, conversationModel.toMap())
+        ..set(
+          conversationDoc.collection('participants').doc(currentUserId),
+          ChatParticipantModel(
+            id: currentUserId,
+            name: currentUserName,
+            photoUrl: currentUserPhoto,
+          ).toMap(),
+        )
+        ..set(
+          conversationDoc.collection('participants').doc(otherUser.id),
+          ChatParticipantModel(
+            id: otherUser.id,
+            name: otherUser.name,
+            photoUrl: otherUser.photoUrl,
+            isOnline: otherUser.isOnline,
+            lastSeen: otherUser.lastSeen,
+          ).toMap(),
+        );
+      await batch.commit();
       return conversationModel;
     } on FirebaseException catch (e) {
       if (e.code == 'permission-denied') {
@@ -278,7 +298,6 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
         groupName: groupName.trim(),
         groupAvatar: groupAvatar,
         participantIds: participantIds,
-        participants: participantsMap,
         createdBy: currentUserId,
         adminIds: [currentUserId],
         createdAt: now,
@@ -288,7 +307,15 @@ class ChatRemoteDataSourceImpl implements ChatRemoteDataSource {
         },
       );
 
-      await conversationDoc.set(conversationModel.toMap());
+      final batch = _firestore.batch()
+        ..set(conversationDoc, conversationModel.toMap());
+      for (final p in participantsMap.values) {
+        batch.set(
+          conversationDoc.collection('participants').doc(p.id),
+          p.toMap(),
+        );
+      }
+      await batch.commit();
       return conversationModel;
     } on FirebaseException catch (e) {
       if (e.code == 'permission-denied') {

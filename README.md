@@ -139,7 +139,7 @@ npm run lint
 
 ## 🧪 Quality Assurance & Test Breakdown
 
-The test suite contains **128 automated tests** across six distinct test suites:
+The test suite contains **140 automated tests** across six distinct test suites:
 
 1. **Flutter Unit Tests (34 tests)**:
    - Auth repository error mapping and offline detection.
@@ -163,9 +163,9 @@ The test suite contains **128 automated tests** across six distinct test suites:
 5. **Cloud Functions Unit & Production Helper Tests (38 tests)**:
    - **Account Cleanup Helpers (`cleanup_helpers.test.ts`, 10 tests)**: Token chunking ($\le 400$), conversation query limit ($\le 300 \le 500$), strict 404 error classification (`isStorageNotFoundError`), non-404 error rethrow, deterministic admin succession fallback, co-admin preservation, stage tracking idempotency, retry safety, migration dry-run audit (`auditLegacyParticipantEmails`).
    - **Push Notification Helpers (`notifications_helpers.test.ts`, 13 tests)**: All-tokens success, permanent invalid token pruning, transient token retryability, multi-chunk dispatch ($\le 500$), retry filtering with `previouslySentTokens`, progress persistence errors, concurrency lease lock contention and recovery, non-premature completion checks, error code classification, retry window bounding (`isEventExpiredForRetry`), failure retryability classification (`isRetryableNotificationError`).
-   - **Presence Ordering Guard (`presence_helpers.test.ts`, 8 tests)**: Newer connect/disconnect commits, older connect/disconnect rejected, simultaneous competing transactions, multi-device online aggregation, reconnection state restoration, deterministic equal-timestamp handling.
+   - **Presence High-Precision Ordering Guard (`presence_helpers.test.ts`, 8 tests)**: Millisecond differing events, sub-millisecond fractional precision preservation without collapsing, equal timestamp deterministic rejection, older connect/disconnect rejection, competing transactions, multi-device online aggregation, reconnection state restoration.
    - **Search Rate Limiting & Privacy Helpers (`search_helpers.test.ts`, 7 tests)**: Strict profile sanitization, rolling 60-second window acceptance (15 reqs), 16th request rejection, expired timestamp roll-off, boundary burst prevention, atomic transaction concurrency safety, complete window reset.
-6. **Firebase Emulator Integration Tests (28 tests)**:
+6. **Firebase Emulator Security Rules & Concurrency Tests (40 tests)**:
    - Unauthenticated access denial (Firestore, RTDB, Storage).
    - Private FCM token isolation.
    - User profile enumeration denial (`getDocs(collection('users'))` fails).
@@ -185,14 +185,23 @@ The test suite contains **128 automated tests** across six distinct test suites:
    - Deterministic direct conversation ID enforcement (`min_max`).
    - Storage attachment and RTDB presence authorization boundaries.
    - Internal metadata collections protection (`_rate_limits`, `_function_events`, `_cleanup_progress`).
-   - **Server-Enforced Participant Snapshot Privacy (Phase 4.2)**:
+   - **Participant Privacy & Subcollection Scaling (Phase 4.2 & Phase 4.3)**:
      - Valid direct conversation creation with sanitized participant snapshots succeeds.
-     - Valid group conversation creation with sanitized participant snapshots succeeds.
-     - Direct conversation creation with nested participant email is rejected.
-     - Group conversation creation with nested participant email is rejected.
-     - Group administrator attempting to add email through a participant update is rejected.
-     - Attempting to inject provider, role, status, or other private metadata into participant snapshots is rejected.
-     - Valid permitted participant metadata updates continue to work.
+     - Direct conversation creation with nested participant email or role/privilege is rejected.
+     - Valid group of 8 succeeds via dedicated `/participants/{uid}` subcollection.
+     - Valid group of 9 succeeds (breaking the former 8-member AST limit).
+     - Valid group of 100 succeeds (preserving 100-member product capacity).
+     - Group creation with nested participant email on parent document is rejected.
+     - Email injection into participant 9, 10, or 100 in subcollection is rejected.
+     - Role, provider, or privilege injection into participant 9 or 100 is rejected.
+     - Group administrator attempting to inject private fields during updates is rejected.
+     - Legitimate administrator adding a member succeeds.
+     - Normal member attempting to add a member fails.
+     - Valid public participant profile updates remain functional (self-update & admin update).
+   - **Live Emulator Concurrency & Migration Verification (Phase 4.3)**:
+     - Search Rate Limiter: 20 concurrent requests against Firestore emulator enforce max 15 requests, 5 get `resource-exhausted`, timestamps array bounded.
+     - Legacy Email Migration: audit scanner identifies affected docs across batches with zero writes in dry-run mode against emulator.
+     - Presence Transaction: concurrent transaction updates against emulator maintain monotonic microsecond order without state regression.
 
 ### Run Verification Commands
 
@@ -209,7 +218,7 @@ flutter test
 # 4. Cloud Functions Build, Lint & Unit Tests (38 tests)
 cd functions && npm run build && npm run lint && npm test && cd ..
 
-# 5. Firebase Security Rules Tests against Live Emulators (28 tests)
+# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (40 tests)
 cd functions && firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
 ```
 

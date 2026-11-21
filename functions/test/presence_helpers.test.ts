@@ -3,109 +3,126 @@ import {
   evaluatePresenceCommit,
   shouldProcessPresenceEvent,
   computeIsOnlineFromConnections,
+  parseEventTimestamp,
 } from '../src/presence_helpers';
 
-describe('Presence Ordering & Concurrency Guard Tests (Phase 4.2)', () => {
-  it('1. Newer connect event commits', () => {
-    const committedTime = 1700000000000;
-    const incomingConnectTime = 1700000005000; // 5s newer
+describe('Presence Ordering & Concurrency Guard Tests (Phase 4.2 & Phase 4.3 High-Precision)', () => {
+  it('1. Event timestamps differing by milliseconds: newer commits, older is rejected', () => {
+    const committedTime = '2026-11-21T18:42:15.100000Z';
+    const newerTime = '2026-11-21T18:42:15.200000Z'; // 100ms newer
 
-    const decision = evaluatePresenceCommit(committedTime, incomingConnectTime);
+    const decision = evaluatePresenceCommit(committedTime, newerTime);
     assert.strictEqual(decision.canCommit, true);
     assert.strictEqual(decision.reason, 'newer_event');
-    assert.strictEqual(shouldProcessPresenceEvent(committedTime, incomingConnectTime), true);
+    assert.strictEqual(shouldProcessPresenceEvent(committedTime, newerTime), true);
+
+    const reverseDecision = evaluatePresenceCommit(newerTime, committedTime);
+    assert.strictEqual(reverseDecision.canCommit, false);
+    assert.strictEqual(reverseDecision.reason, 'stale_older');
+    assert.strictEqual(shouldProcessPresenceEvent(newerTime, committedTime), false);
   });
 
-  it('2. Older disconnect event cannot overwrite the newer state', () => {
-    const committedNewerOnlineTime = 1700000010000;
-    const incomingDelayedDisconnectTime = 1700000005000; // 5s older
+  it('2. Event timestamps differing only by fractional milliseconds: high-precision ordering is preserved without collapsing', () => {
+    // Both events share the exact same millisecond: 18:42:15.123
+    // But eventB has 900 microseconds vs eventA having 100 microseconds (800 microseconds newer)
+    const eventA = '2026-11-21T18:42:15.123100Z';
+    const eventB = '2026-11-21T18:42:15.123900Z';
 
-    const decision = evaluatePresenceCommit(committedNewerOnlineTime, incomingDelayedDisconnectTime);
+    const parsedA = parseEventTimestamp(eventA);
+    const parsedB = parseEventTimestamp(eventB);
+
+    assert.strictEqual(parsedA.millis, parsedB.millis); // Collapses in standard JS Date.getTime()
+    assert.strictEqual(parsedB.micros > parsedA.micros, true); // Distinct in microsecond precision
+
+    // Event B commits over Event A
+    const decisionB = evaluatePresenceCommit(eventA, eventB);
+    assert.strictEqual(decisionB.canCommit, true);
+    assert.strictEqual(decisionB.reason, 'newer_event');
+
+    // Event A cannot overwrite Event B (preventing sub-millisecond regressions)
+    const decisionA = evaluatePresenceCommit(eventB, eventA);
+    assert.strictEqual(decisionA.canCommit, false);
+    assert.strictEqual(decisionA.reason, 'stale_older');
+  });
+
+  it('3. Equal timestamp handling: deterministically rejected as duplicate/stale_equal', () => {
+    const committedTime = '2026-11-21T18:42:15.123456Z';
+    const sameTime = '2026-11-21T18:42:15.123456Z';
+
+    const decision = evaluatePresenceCommit(committedTime, sameTime);
+    assert.strictEqual(decision.canCommit, false);
+    assert.strictEqual(decision.reason, 'stale_equal');
+    assert.strictEqual(shouldProcessPresenceEvent(committedTime, sameTime), false);
+  });
+
+  it('4. An older online event cannot overwrite a newer offline state', () => {
+    const committedOfflineTime = '2026-11-21T18:42:20.000000Z';
+    const delayedOnlineTime = '2026-11-21T18:42:15.000000Z'; // 5s older
+
+    const decision = evaluatePresenceCommit(committedOfflineTime, delayedOnlineTime);
     assert.strictEqual(decision.canCommit, false);
     assert.strictEqual(decision.reason, 'stale_older');
-    assert.strictEqual(shouldProcessPresenceEvent(committedNewerOnlineTime, incomingDelayedDisconnectTime), false);
   });
 
-  it('3. Newer disconnect event commits', () => {
-    const committedOnlineTime = 1700000010000;
-    const incomingDisconnectTime = 1700000020000; // 10s newer
+  it('5. An older offline event cannot overwrite a newer online state', () => {
+    const committedOnlineTime = '2026-11-21T18:42:20.000000Z';
+    const delayedOfflineTime = '2026-11-21T18:42:15.000000Z'; // 5s older
 
-    const decision = evaluatePresenceCommit(committedOnlineTime, incomingDisconnectTime);
-    assert.strictEqual(decision.canCommit, true);
-    assert.strictEqual(decision.reason, 'newer_event');
-  });
-
-  it('4. Older connect event cannot overwrite the newer offline state', () => {
-    const committedOfflineTime = 1700000020000;
-    const incomingDelayedConnectTime = 1700000015000; // 5s older
-
-    const decision = evaluatePresenceCommit(committedOfflineTime, incomingDelayedConnectTime);
+    const decision = evaluatePresenceCommit(committedOnlineTime, delayedOfflineTime);
     assert.strictEqual(decision.canCommit, false);
     assert.strictEqual(decision.reason, 'stale_older');
   });
 
-  it('5. Two simultaneous transitions: the first to commit establishes timestamp; the second with older/equal time is rejected', () => {
+  it('6. Two concurrent transaction attempts cannot produce a stale final state', () => {
     let committedState = {
       isOnline: false,
-      presenceLastEventTimeMs: 1700000000000,
+      timestamp: '2026-11-21T18:42:00.000000Z',
     };
 
-    const eventA = { time: 1700000005000, isOnline: true };
-    const eventB = { time: 1700000004000, isOnline: false }; // arrived concurrently, but slightly older timestamp
+    const txn1 = { timestamp: '2026-11-21T18:42:10.000500Z', isOnline: true };
+    const txn2 = { timestamp: '2026-11-21T18:42:10.000100Z', isOnline: false }; // slightly older microsecond
 
-    // Simulated transaction for Event A:
-    const decisionA = evaluatePresenceCommit(committedState.presenceLastEventTimeMs, eventA.time);
-    assert.strictEqual(decisionA.canCommit, true);
-    committedState = { isOnline: eventA.isOnline, presenceLastEventTimeMs: eventA.time };
+    // Txn1 commits first
+    const dec1 = evaluatePresenceCommit(committedState.timestamp, txn1.timestamp);
+    assert.strictEqual(dec1.canCommit, true);
+    committedState = { isOnline: txn1.isOnline, timestamp: txn1.timestamp };
 
-    // Simulated transaction for Event B (competing concurrent transaction):
-    // Inside transaction, it reads the updated committedState:
-    const decisionB = evaluatePresenceCommit(committedState.presenceLastEventTimeMs, eventB.time);
-    assert.strictEqual(decisionB.canCommit, false);
-    assert.strictEqual(decisionB.reason, 'stale_older');
+    // Txn2 attempts to commit against the updated state
+    const dec2 = evaluatePresenceCommit(committedState.timestamp, txn2.timestamp);
+    assert.strictEqual(dec2.canCommit, false);
+    assert.strictEqual(dec2.reason, 'stale_older');
 
-    // State remains Event A's newer online state
+    // Committed state remains Txn1's newer online state
     assert.strictEqual(committedState.isOnline, true);
-    assert.strictEqual(committedState.presenceLastEventTimeMs, 1700000005000);
+    assert.strictEqual(committedState.timestamp, '2026-11-21T18:42:10.000500Z');
   });
 
-  it('6. Multiple devices: user remains online while at least one connection exists', () => {
-    // 3 active devices
+  it('7. Multi-device presence remains correct', () => {
+    // 3 active devices -> online
     assert.strictEqual(computeIsOnlineFromConnections(3), true);
-    // 2 active devices
+    // 2 active devices -> online
     assert.strictEqual(computeIsOnlineFromConnections(2), true);
-    // 1 active device left
+    // 1 active device left -> still online
     assert.strictEqual(computeIsOnlineFromConnections(1), true);
     // Final device disconnects -> offline
     assert.strictEqual(computeIsOnlineFromConnections(0), false);
   });
 
-  it('7. Reconnection restores the correct online state with newer timestamp', () => {
+  it('8. Reconnection remains correct with newer timestamp', () => {
     let committedState = {
       isOnline: false,
-      presenceLastEventTimeMs: 1700000020000,
+      timestamp: '2026-11-21T18:42:20.000000Z',
     };
 
-    const reconnectTime = 1700000030000; // 10s after disconnect
-    const reconnectDecision = evaluatePresenceCommit(committedState.presenceLastEventTimeMs, reconnectTime);
+    const reconnectTime = '2026-11-21T18:42:30.000000Z'; // 10s after disconnect
+    const reconnectDecision = evaluatePresenceCommit(committedState.timestamp, reconnectTime);
     assert.strictEqual(reconnectDecision.canCommit, true);
 
     committedState = {
       isOnline: true,
-      presenceLastEventTimeMs: reconnectTime,
+      timestamp: reconnectTime,
     };
     assert.strictEqual(committedState.isOnline, true);
-    assert.strictEqual(committedState.presenceLastEventTimeMs, 1700000030000);
-  });
-
-  it('8. Equal or indistinguishable timestamps are handled deterministically without overwriting committed state', () => {
-    const committedTime = 1700000050000;
-    const sameTimeEvent = 1700000050000; // exact same millisecond
-
-    const decision = evaluatePresenceCommit(committedTime, sameTimeEvent);
-    // Deterministic policy: once a state is committed for timestamp T, another event with equal timestamp T CANNOT overwrite
-    assert.strictEqual(decision.canCommit, false);
-    assert.strictEqual(decision.reason, 'stale_equal');
-    assert.strictEqual(shouldProcessPresenceEvent(committedTime, sameTimeEvent), false);
+    assert.strictEqual(committedState.timestamp, '2026-11-21T18:42:30.000000Z');
   });
 });

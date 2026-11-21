@@ -84,7 +84,7 @@ export async function enforceSearchRateLimit(
       },
       { merge: true }
     );
-  });
+  }, { maxAttempts: 25 });
 }
 
 /**

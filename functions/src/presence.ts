@@ -1,17 +1,18 @@
 import * as functions from 'firebase-functions';
 import * as admin from 'firebase-admin';
-import { evaluatePresenceCommit } from './presence_helpers';
+import { evaluatePresenceCommit, parseEventTimestamp } from './presence_helpers';
 
 /**
  * Server-authoritative presence mirror from Realtime Database to Cloud Firestore.
  *
- * Concurrency & Ordering Architecture (Phase 4.2):
+ * Concurrency & Ordering Architecture (Phase 4.2 & Phase 4.3):
  * - Realtime Database is the sole source of truth for active client connections.
  * - Each client device registers under `/status/{userId}/connections/{deviceId}` with onDisconnect().remove().
  * - When connections change, this function inspects the live connection node.
  * - Out-of-order race conditions are guarded by an ATOMIC Firestore transaction reading
- *   `presenceLastEventTimeMs` from `/users/{userId}` and `/public_users/{userId}`.
- * - Only strictly newer events (`eventTimeMs > committedLastEventTimeMs`) commit.
+ *   committed timestamps from `/users/{userId}` and `/public_users/{userId}`.
+ * - High-precision timestamp ordering: preserves microsecond precision from context.timestamp RFC 3339 string.
+ * - Only strictly newer events (`incomingMicros > committedMicros`) commit.
  *   Older and equal timestamps abort inside the transaction, guaranteeing that concurrent
  *   or out-of-order executions cannot overwrite fresher presence state.
  * - If 1+ connections exist -> mirrors `isOnline: true` to `/users/{userId}` and `/public_users/{userId}`.
@@ -24,11 +25,11 @@ export const onUserStatusChanged = functions
   .onWrite(async (change, context) => {
     const { userId } = context.params;
     const nowMs = Date.now();
-    const eventTimeMs = context.timestamp ? new Date(context.timestamp).getTime() : nowMs;
+    const incomingTimestamp = parseEventTimestamp(context.timestamp);
 
     // Drop events older than 5 minutes to avoid obsolete updates
-    if (nowMs - eventTimeMs > 5 * 60 * 1000) {
-      functions.logger.warn(`Dropping stale presence event for user ${userId} (${nowMs - eventTimeMs}ms old).`);
+    if (nowMs - incomingTimestamp.millis > 5 * 60 * 1000) {
+      functions.logger.warn(`Dropping stale presence event for user ${userId} (${nowMs - incomingTimestamp.millis}ms old).`);
       return;
     }
 
@@ -63,14 +64,17 @@ export const onUserStatusChanged = functions
         return;
       }
 
-      const userLastTime = (userDoc.data()?.presenceLastEventTimeMs as number) || 0;
-      const publicLastTime = (publicUserDoc.data()?.presenceLastEventTimeMs as number) || 0;
-      const currentCommittedTime = Math.max(userLastTime, publicLastTime);
+      const userDocData = userDoc.data();
+      const publicUserDocData = publicUserDoc.data();
 
-      const decision = evaluatePresenceCommit(currentCommittedTime, eventTimeMs);
+      const userMicros = (userDocData?.presenceLastEventTimeMicros as number) || ((userDocData?.presenceLastEventTimeMs as number) || 0) * 1000;
+      const publicMicros = (publicUserDocData?.presenceLastEventTimeMicros as number) || ((publicUserDocData?.presenceLastEventTimeMs as number) || 0) * 1000;
+      const currentCommittedMicros = Math.max(userMicros, publicMicros);
+
+      const decision = evaluatePresenceCommit(currentCommittedMicros, incomingTimestamp);
       if (!decision.canCommit) {
         functions.logger.info(
-          `Presence: Stale event for ${userId} ignored inside transaction (${eventTimeMs} <= ${currentCommittedTime}, reason: ${decision.reason}).`
+          `Presence: Stale event for ${userId} ignored inside transaction (${incomingTimestamp.micros} <= ${currentCommittedMicros}, reason: ${decision.reason}).`
         );
         return;
       }
@@ -78,7 +82,9 @@ export const onUserStatusChanged = functions
       // Prepare updates
       const updateData: Record<string, any> = {
         isOnline,
-        presenceLastEventTimeMs: eventTimeMs,
+        presenceLastEventTimeMs: incomingTimestamp.millis,
+        presenceLastEventTimeMicros: Number(incomingTimestamp.micros),
+        presenceLastEventTimeIso: incomingTimestamp.isoString,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       };
 
@@ -95,6 +101,6 @@ export const onUserStatusChanged = functions
     });
 
     functions.logger.info(
-      `Presence: Authoritative update completed for user ${userId}: isOnline=${isOnline}, eventTimeMs=${eventTimeMs}`
+      `Presence: Authoritative update completed for user ${userId}: isOnline=${isOnline}, micros=${incomingTimestamp.micros}`
     );
   });

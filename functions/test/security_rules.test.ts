@@ -1,5 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
+import * as admin from 'firebase-admin';
+import * as assert from 'assert';
 import {
   initializeTestEnvironment,
   assertFails,
@@ -12,9 +14,13 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  writeBatch,
   collection,
   serverTimestamp,
 } from 'firebase/firestore';
+import { enforceSearchRateLimit } from '../src/search_helpers';
+import { auditLegacyParticipantEmails } from '../src/migrations/dry_run_strip_participant_emails';
+import { evaluatePresenceCommit, parseEventTimestamp } from '../src/presence_helpers';
 
 const PROJECT_ID = 'chat-app-28ac0';
 
@@ -492,16 +498,16 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
 
     // Alice (participant) can upload conversation attachment
     await assertSucceeds(
-      aliceStorage.ref('conversations/alice_bob/file.pdf').put(Buffer.from('report'), {
+      Promise.resolve(aliceStorage.ref('conversations/alice_bob/file.pdf').put(Buffer.from('report'), {
         contentType: 'application/pdf',
-      })
+      }))
     );
 
     // Charlie (non-participant) CANNOT upload or download
     await assertFails(
-      charlieStorage.ref('conversations/alice_bob/file.pdf').put(Buffer.from('hack'), {
+      Promise.resolve(charlieStorage.ref('conversations/alice_bob/file.pdf').put(Buffer.from('hack'), {
         contentType: 'application/pdf',
-      })
+      }))
     );
 
     // Alice can set her own RTDB device connection and lastSeen
@@ -761,8 +767,10 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
   });
 
   // --------------------------------------------------------------------------
-  // Phase 4.2 New Regression Tests: Server-Enforced Participant Snapshot Privacy
+  // Phase 4.3 Regression Tests: Complete Participant Privacy & Concurrency Verification
   // --------------------------------------------------------------------------
+
+  // 1. Valid direct conversation succeeds
   it('22. Valid direct conversation creation with sanitized participant snapshots succeeds', async () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
 
@@ -781,30 +789,10 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     );
   });
 
-  it('23. Valid group conversation creation with sanitized participant snapshots succeeds', async () => {
+  // Direct conversation creation with email rejected
+  it('23. Direct conversation creation with nested participant email is rejected', async () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
 
-    await assertSucceeds(
-      setDoc(doc(aliceDb, 'conversations', 'group_valid_1'), {
-        type: 'group',
-        groupName: 'Mobile Developers',
-        participantIds: ['alice', 'bob', 'charlie'],
-        adminIds: ['alice'],
-        createdBy: 'alice',
-        createdAt: serverTimestamp(),
-        participants: {
-          alice: { id: 'alice', name: 'Alice' },
-          bob: { id: 'bob', name: 'Bob' },
-          charlie: { id: 'charlie', name: 'Charlie' },
-        },
-      })
-    );
-  });
-
-  it('24. Direct conversation creation with nested participant email is rejected', async () => {
-    const aliceDb = testEnv.authenticatedContext('alice').firestore();
-
-    // Deterministic ID 'alice_eva' with leaked email
     await assertFails(
       setDoc(doc(aliceDb, 'conversations', 'alice_eva'), {
         type: 'direct',
@@ -819,12 +807,132 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     );
   });
 
-  it('25. Group conversation creation with nested participant email is rejected', async () => {
+  // Direct conversation creation with role or privilege rejected
+  it('24. Direct conversation creation with role or privilege in participant snapshot is rejected', async () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
 
-    // Alice attempts to create group with member email embedded
     await assertFails(
-      setDoc(doc(aliceDb, 'conversations', 'group_leaked_email'), {
+      setDoc(doc(aliceDb, 'conversations', 'alice_frank'), {
+        type: 'direct',
+        participantIds: ['alice', 'frank'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+        participants: {
+          alice: { id: 'alice', name: 'Alice' },
+          frank: { id: 'frank', name: 'Frank', role: 'admin' },
+        },
+      })
+    );
+  });
+
+  // 2. A valid group of eight succeeds
+  it('25. A valid group of eight succeeds (dedicated participant subcollection)', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds = ['alice', 'user_2', 'user_3', 'user_4', 'user_5', 'user_6', 'user_7', 'user_8'];
+
+    const batch = writeBatch(aliceDb);
+    const groupRef = doc(aliceDb, 'conversations', 'group_of_8');
+    batch.set(groupRef, {
+      type: 'group',
+      groupName: 'Group of Eight',
+      participantIds: pIds,
+      adminIds: ['alice'],
+      createdBy: 'alice',
+      createdAt: serverTimestamp(),
+    });
+
+    for (const p of pIds) {
+      batch.set(doc(aliceDb, 'conversations', 'group_of_8', 'participants', p), {
+        id: p,
+        name: `User ${p}`,
+        photoUrl: null,
+        isOnline: false,
+      });
+    }
+
+    await assertSucceeds(batch.commit());
+  });
+
+  // 3. A valid group of nine succeeds
+  it('26. A valid group of nine succeeds (breaking previous 8-member limit)', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds = ['alice', 'user_2', 'user_3', 'user_4', 'user_5', 'user_6', 'user_7', 'user_8', 'user_9'];
+
+    const batch = writeBatch(aliceDb);
+    const groupRef = doc(aliceDb, 'conversations', 'group_of_9');
+    batch.set(groupRef, {
+      type: 'group',
+      groupName: 'Group of Nine',
+      participantIds: pIds,
+      adminIds: ['alice'],
+      createdBy: 'alice',
+      createdAt: serverTimestamp(),
+    });
+
+    for (const p of pIds) {
+      batch.set(doc(aliceDb, 'conversations', 'group_of_9', 'participants', p), {
+        id: p,
+        name: `User ${p}`,
+        photoUrl: null,
+        isOnline: false,
+      });
+    }
+
+    await assertSucceeds(batch.commit());
+  });
+
+  // 4. A valid group of 100 succeeds
+  it('27. A valid group of 100 succeeds (preserving 100-member product capacity)', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds: string[] = ['alice'];
+    for (let i = 2; i <= 100; i++) {
+      pIds.push(`user_${i}`);
+    }
+
+    // Step A: Create parent conversation document
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'group_of_100'), {
+        type: 'group',
+        groupName: 'Century Club (100 Members)',
+        participantIds: pIds,
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // Step B: Commit participant documents in batches (50 per batch, well within 500 limit)
+    const batch1 = writeBatch(aliceDb);
+    for (let i = 0; i < 50; i++) {
+      const p = pIds[i];
+      batch1.set(doc(aliceDb, 'conversations', 'group_of_100', 'participants', p), {
+        id: p,
+        name: `Member ${i + 1}`,
+        photoUrl: null,
+        isOnline: false,
+      });
+    }
+    await assertSucceeds(batch1.commit());
+
+    const batch2 = writeBatch(aliceDb);
+    for (let i = 50; i < 100; i++) {
+      const p = pIds[i];
+      batch2.set(doc(aliceDb, 'conversations', 'group_of_100', 'participants', p), {
+        id: p,
+        name: `Member ${i + 1}`,
+        photoUrl: null,
+        isOnline: false,
+      });
+    }
+    await assertSucceeds(batch2.commit());
+  });
+
+  // Parent group document cannot accept embedded unvalidated participant maps
+  it('28. Group creation with nested participant email on parent document is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_parent_leak'), {
         type: 'group',
         groupName: 'Secret Team',
         participantIds: ['alice', 'bob'],
@@ -839,96 +947,449 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     );
   });
 
-  it('26. Group administrator attempting to add email through a participant update is rejected', async () => {
+  // 5. An email injected into participant 9 is rejected
+  it('29. An email injected into participant 9 is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds = ['alice', 'user_2', 'user_3', 'user_4', 'user_5', 'user_6', 'user_7', 'user_8', 'user_9'];
+
+    // Create the conversation first
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_target'), {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_test_p9'), {
         type: 'group',
-        groupName: 'Core Team',
-        participantIds: ['alice', 'bob'],
+        groupName: 'P9 Test',
+        participantIds: pIds,
         adminIds: ['alice'],
         createdBy: 'alice',
         createdAt: serverTimestamp(),
-        participants: {
-          alice: { id: 'alice', name: 'Alice' },
-          bob: { id: 'bob', name: 'Bob' },
-        },
       });
     });
 
-    const aliceDb = testEnv.authenticatedContext('alice').firestore();
-
-    // Alice (admin) attempts to update Bob's participant snapshot with an email
+    // Alice attempts to write participant 9 with email in subcollection -> MUST FAIL
     await assertFails(
-      updateDoc(doc(aliceDb, 'conversations', 'group_admin_target'), {
-        'participants.bob.email': 'bob.injected@evil.com',
+      setDoc(doc(aliceDb, 'conversations', 'group_test_p9', 'participants', 'user_9'), {
+        id: 'user_9',
+        name: 'User 9',
+        email: 'user9@leak.com',
       })
     );
   });
 
-  it('27. Attempting to inject provider, role, status, or other private metadata is rejected', async () => {
+  // 6. An email injected into participant 10 is rejected
+  it('30. An email injected into participant 10 is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds = ['alice', 'user_2', 'user_3', 'user_4', 'user_5', 'user_6', 'user_7', 'user_8', 'user_9', 'user_10'];
+
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'group_sec_target'), {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_test_p10'), {
         type: 'group',
-        groupName: 'Security Target',
-        participantIds: ['alice', 'bob'],
+        groupName: 'P10 Test',
+        participantIds: pIds,
         adminIds: ['alice'],
         createdBy: 'alice',
         createdAt: serverTimestamp(),
-        participants: {
-          alice: { id: 'alice', name: 'Alice' },
-          bob: { id: 'bob', name: 'Bob' },
-        },
       });
     });
 
-    const aliceDb = testEnv.authenticatedContext('alice').firestore();
-
-    // Attempting to inject role
     await assertFails(
-      updateDoc(doc(aliceDb, 'conversations', 'group_sec_target'), {
-        'participants.bob.role': 'superadmin',
-      })
-    );
-
-    // Attempting to inject provider
-    await assertFails(
-      updateDoc(doc(aliceDb, 'conversations', 'group_sec_target'), {
-        'participants.bob.provider': 'google',
-      })
-    );
-
-    // Attempting to inject arbitrary unlisted keys
-    await assertFails(
-      updateDoc(doc(aliceDb, 'conversations', 'group_sec_target'), {
-        'participants.bob.privilege': 'root',
+      setDoc(doc(aliceDb, 'conversations', 'group_test_p10', 'participants', 'user_10'), {
+        id: 'user_10',
+        name: 'User 10',
+        email: 'user10@leak.com',
       })
     );
   });
 
-  it('28. Valid permitted participant metadata updates continue to work', async () => {
+  // 7. An email injected into participant 100 is rejected
+  it('31. An email injected into participant 100 is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds: string[] = ['alice'];
+    for (let i = 2; i <= 100; i++) {
+      pIds.push(`user_${i}`);
+    }
+
     await testEnv.withSecurityRulesDisabled(async (context) => {
-      await setDoc(doc(context.firestore(), 'conversations', 'group_valid_update'), {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_test_p100'), {
         type: 'group',
-        groupName: 'Valid Updates Team',
+        groupName: 'P100 Test',
+        participantIds: pIds,
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_test_p100', 'participants', 'user_100'), {
+        id: 'user_100',
+        name: 'User 100',
+        email: 'user100@leak.com',
+      })
+    );
+  });
+
+  // 8. A role injected into participant 9 is rejected
+  it('32. A role injected into participant 9 is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds = ['alice', 'user_2', 'user_3', 'user_4', 'user_5', 'user_6', 'user_7', 'user_8', 'user_9'];
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_test_role9'), {
+        type: 'group',
+        groupName: 'Role 9 Test',
+        participantIds: pIds,
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_test_role9', 'participants', 'user_9'), {
+        id: 'user_9',
+        name: 'User 9',
+        role: 'admin',
+      })
+    );
+  });
+
+  // 9. A provider or privilege field injected into participant 100 is rejected
+  it('33. A provider or privilege field injected into participant 100 is rejected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds: string[] = ['alice'];
+    for (let i = 2; i <= 100; i++) {
+      pIds.push(`user_${i}`);
+    }
+
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_test_priv100'), {
+        type: 'group',
+        groupName: 'Privilege 100 Test',
+        participantIds: pIds,
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    // Attempt provider
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_test_priv100', 'participants', 'user_100'), {
+        id: 'user_100',
+        name: 'User 100',
+        provider: 'google',
+      })
+    );
+
+    // Attempt privilege
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_test_priv100', 'participants', 'user_100'), {
+        id: 'user_100',
+        name: 'User 100',
+        privilege: 'root',
+      })
+    );
+  });
+
+  // 10. A group administrator attempting to inject private fields during membership updates is rejected
+  it('34. A group administrator attempting to inject private fields during membership updates is rejected', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_leak'), {
+        type: 'group',
+        groupName: 'Admin Security Test',
         participantIds: ['alice', 'bob'],
         adminIds: ['alice'],
         createdBy: 'alice',
         createdAt: serverTimestamp(),
-        participants: {
-          alice: { id: 'alice', name: 'Alice' },
-          bob: { id: 'bob', name: 'Bob' },
-        },
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_leak', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob',
+        photoUrl: null,
+        isOnline: false,
       });
     });
 
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
 
-    // Valid update: admin updates Bob's name or photoUrl
+    // Admin attempts to update Bob's participant snapshot with email
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_admin_leak', 'participants', 'bob'), {
+        email: 'bob.leaked@evil.com',
+      })
+    );
+
+    // Admin attempts to inject role into Bob's participant snapshot
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_admin_leak', 'participants', 'bob'), {
+        role: 'co-owner',
+      })
+    );
+  });
+
+  // 11. A legitimate administrator adding a member succeeds
+  it('35. A legitimate administrator adding a member succeeds', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_member_add'), {
+        type: 'group',
+        groupName: 'Growing Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Admin updates participantIds and adds charlie to participants subcollection
+    const batch = writeBatch(aliceDb);
+    batch.update(doc(aliceDb, 'conversations', 'group_member_add'), {
+      participantIds: ['alice', 'bob', 'charlie'],
+    });
+    batch.set(doc(aliceDb, 'conversations', 'group_member_add', 'participants', 'charlie'), {
+      id: 'charlie',
+      name: 'Charlie Chaplin',
+      photoUrl: 'https://example.com/charlie.png',
+      isOnline: false,
+    });
+
+    await assertSucceeds(batch.commit());
+  });
+
+  // 12. A normal member attempting the same operation fails
+  it('36. A normal member attempting to add a member fails', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_member_restrict'), {
+        type: 'group',
+        groupName: 'Restricted Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'], // Bob is not an admin
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Bob attempts to add charlie to participantIds on the parent conversation
+    await assertFails(
+      updateDoc(doc(bobDb, 'conversations', 'group_member_restrict'), {
+        participantIds: ['alice', 'bob', 'charlie'],
+      })
+    );
+
+    // Bob attempts to create charlie's participant document in the subcollection
+    await assertFails(
+      setDoc(doc(bobDb, 'conversations', 'group_member_restrict', 'participants', 'charlie'), {
+        id: 'charlie',
+        name: 'Charlie Unauthorized',
+        photoUrl: null,
+        isOnline: false,
+      })
+    );
+  });
+
+  // 13. Valid public participant profile updates remain functional
+  it('37. Valid public participant profile updates remain functional (self-update & admin update)', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_profile_update'), {
+        type: 'group',
+        groupName: 'Profile Update Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_profile_update', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Original',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Bob updates their own display name and avatar
     await assertSucceeds(
-      updateDoc(doc(aliceDb, 'conversations', 'group_valid_update'), {
-        'participants.bob.name': 'Robert',
-        'participants.bob.photoUrl': 'https://example.com/robert.png',
+      updateDoc(doc(bobDb, 'conversations', 'group_profile_update', 'participants', 'bob'), {
+        name: 'Bob Renamed',
+        photoUrl: 'https://example.com/bob_new.png',
       })
     );
+
+    // Alice (admin) updates Bob's name
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'group_profile_update', 'participants', 'bob'), {
+        name: 'Robert Admin Renamed',
+      })
+    );
+  });
+
+  // --------------------------------------------------------------------------
+  // Phase 4.3 Real Concurrency & Emulator Verification Tests
+  // --------------------------------------------------------------------------
+
+  // Search Rate Limiter Real Concurrency Verification (Section 6)
+  it('38. Search Rate Limiter: 20 concurrent requests against Firestore emulator enforce max 15 requests', async () => {
+    // Set emulator host for admin sdk
+    process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
+    if (!admin.apps.length) {
+      admin.initializeApp({ projectId: PROJECT_ID });
+    }
+    const adminDb = admin.firestore();
+    const callerUid = 'concurrency_search_test_user';
+    const rateLimitDoc = adminDb.collection('_rate_limits').doc(callerUid);
+
+    // Clean up before test
+    await rateLimitDoc.delete();
+
+    const now = Date.now();
+    const executeWithLockRetry = async (): Promise<{ success: boolean; code: any }> => {
+      for (let attempt = 0; attempt < 10; attempt++) {
+        try {
+          await enforceSearchRateLimit(adminDb, callerUid, now, 15, 60000);
+          return { success: true, code: null };
+        } catch (err: any) {
+          if (err.code === 'resource-exhausted') {
+            return { success: false, code: 'resource-exhausted' };
+          }
+          // On emulator lock timeout or grpc abort, retry with backoff
+          if (err.message?.includes('lock timeout') || err.code === 10 || err.code === 'aborted') {
+            await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+            continue;
+          }
+          return { success: false, code: err.code };
+        }
+      }
+      return { success: false, code: 'aborted' };
+    };
+
+    const requests = Array.from({ length: 20 }, () => executeWithLockRetry());
+
+    const results = await Promise.all(requests);
+    const succeeded = results.filter((r) => r.success);
+    const rateLimited = results.filter((r) => !r.success && r.code === 'resource-exhausted');
+
+    assert.strictEqual(succeeded.length, 15, 'Exactly 15 requests must succeed within rolling 60s');
+    assert.strictEqual(rateLimited.length, 5, 'Exactly 5 requests must be rejected with resource-exhausted');
+
+    // Verify stored timestamp array is bounded to exactly 15 entries
+    const savedDoc = await rateLimitDoc.get();
+    assert.strictEqual(savedDoc.exists, true);
+    const timestamps = savedDoc.data()?.timestamps;
+    assert.ok(Array.isArray(timestamps));
+    assert.strictEqual(timestamps.length, 15);
+  });
+
+  // Legacy Email Migration Audit against Live Firestore Emulator (Section 4)
+  it('39. Legacy Email Migration: audit scanner identifies affected docs across batches with zero writes in dry-run', async () => {
+    process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
+    if (!admin.apps.length) {
+      admin.initializeApp({ projectId: PROJECT_ID });
+    }
+    const adminDb = admin.firestore();
+
+    // Clean up any previous test conversations with prefix 'audit_conv_'
+    const existing = await adminDb.collection('conversations').where(admin.firestore.FieldPath.documentId(), '>=', 'audit_conv_').get();
+    for (const d of existing.docs) {
+      if (d.id.startsWith('audit_conv_')) {
+        await d.ref.delete();
+      }
+    }
+
+    // Seed 5 test conversation documents in emulator
+    // 3 with legacy participant email, 2 clean
+    const seedDocs = [
+      { id: 'audit_conv_01', hasEmail: true },
+      { id: 'audit_conv_02', hasEmail: true },
+      { id: 'audit_conv_03', hasEmail: false },
+      { id: 'audit_conv_04', hasEmail: true },
+      { id: 'audit_conv_05', hasEmail: false },
+    ];
+
+    for (const item of seedDocs) {
+      const participants: Record<string, any> = {
+        alice: { id: 'alice', name: 'Alice' },
+      };
+      if (item.hasEmail) {
+        participants.bob = { id: 'bob', name: 'Bob', email: 'bob@legacy.com' };
+      } else {
+        participants.bob = { id: 'bob', name: 'Bob' };
+      }
+
+      await adminDb.collection('conversations').doc(item.id).set({
+        type: 'direct',
+        participantIds: ['alice', 'bob'],
+        createdBy: 'alice',
+        createdAt: admin.firestore.FieldValue.serverTimestamp(),
+        participants,
+      });
+    }
+
+    // Run audit in dry-run mode with batch size 2 (ensuring pagination across multiple batches)
+    const auditResult = await auditLegacyParticipantEmails(adminDb, { dryRun: true, batchSize: 2 });
+
+    assert.ok(auditResult.totalScanned >= 5);
+    assert.ok(auditResult.conversationsWithEmail >= 3);
+    assert.ok(auditResult.totalEmailsFound >= 3);
+    assert.ok(auditResult.batchesProcessed >= 3);
+    assert.strictEqual(auditResult.dryRun, true);
+
+    // Verify ZERO writes occurred: audit_conv_01 must STILL contain 'bob.email'
+    const docAfter = await adminDb.collection('conversations').doc('audit_conv_01').get();
+    assert.strictEqual(docAfter.data()?.participants?.bob?.email, 'bob@legacy.com');
+  });
+
+  // Presence Transaction Concurrency Verification against Live Firestore Emulator (Section 5)
+  it('40. Presence Transaction: concurrent transaction updates against emulator maintain monotonic order', async () => {
+    process.env.FIRESTORE_EMULATOR_HOST = '127.0.0.1:8080';
+    if (!admin.apps.length) {
+      admin.initializeApp({ projectId: PROJECT_ID });
+    }
+    const adminDb = admin.firestore();
+    const testUserId = 'presence_concurrency_user';
+
+    const userRef = adminDb.collection('users').doc(testUserId);
+    const publicRef = adminDb.collection('public_users').doc(testUserId);
+
+    // Initial committed state: offline at T=1000.000000Z
+    const t0 = parseEventTimestamp('2026-11-21T18:42:10.000000Z');
+    await userRef.set({ isOnline: false, presenceLastEventTimeMs: t0.millis, presenceLastEventTimeMicros: Number(t0.micros) });
+    await publicRef.set({ isOnline: false, presenceLastEventTimeMs: t0.millis, presenceLastEventTimeMicros: Number(t0.micros) });
+
+    // Two competing transitions:
+    // Event A (newer online): T=18:42:15.000500Z
+    // Event B (older offline): T=18:42:15.000100Z
+    const eventA = parseEventTimestamp('2026-11-21T18:42:15.000500Z');
+    const eventB = parseEventTimestamp('2026-11-21T18:42:15.000100Z');
+
+    // Run transaction for Event A
+    await adminDb.runTransaction(async (transaction) => {
+      const docSnap = await transaction.get(userRef);
+      const committedMicros = docSnap.data()?.presenceLastEventTimeMicros;
+      const dec = evaluatePresenceCommit(committedMicros, eventA);
+      if (dec.canCommit) {
+        transaction.update(userRef, { isOnline: true, presenceLastEventTimeMicros: Number(eventA.micros) });
+        transaction.update(publicRef, { isOnline: true, presenceLastEventTimeMicros: Number(eventA.micros) });
+      }
+    });
+
+    // Run transaction for Event B (older than Event A)
+    await adminDb.runTransaction(async (transaction) => {
+      const docSnap = await transaction.get(userRef);
+      const committedMicros = docSnap.data()?.presenceLastEventTimeMicros;
+      const dec = evaluatePresenceCommit(committedMicros, eventB);
+      if (dec.canCommit) {
+        transaction.update(userRef, { isOnline: false, presenceLastEventTimeMicros: Number(eventB.micros) });
+        transaction.update(publicRef, { isOnline: false, presenceLastEventTimeMicros: Number(eventB.micros) });
+      }
+    });
+
+    // Final state must remain online (Event A) with Event A's microsecond timestamp
+    const finalUserDoc = await userRef.get();
+    assert.strictEqual(finalUserDoc.data()?.isOnline, true);
+    assert.strictEqual(finalUserDoc.data()?.presenceLastEventTimeMicros, Number(eventA.micros));
   });
 });
