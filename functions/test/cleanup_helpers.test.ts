@@ -216,7 +216,7 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
     assert.strictEqual(result.dryRun, true);
   });
 
-  it('11. Migration Execution Guard: enforces operational environment token, backup verification, and production safety lock', async () => {
+  it('11. Migration Execution Guard: enforces operational environment token, fresh backup bounds, project identity, and production safety lock', async () => {
     const { executeParticipantEmailSanitization } = await import('../src/migrations/dry_run_strip_participant_emails');
     const mockFirestore: any = {
       collection: () => ({
@@ -228,59 +228,186 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
       }),
     };
 
-    // 1. Rejects when authorization token doesn't match environment
-    process.env.MIGRATION_EXECUTION_TOKEN = 'VALID_SECRET_TOKEN_123';
+    const now = 1763780000000;
+    const freshBackupTimestamp = new Date(now - 2 * 3600 * 1000).toISOString(); // 2 hours old
+    const staleBackupTimestamp = new Date(now - 25 * 3600 * 1000).toISOString(); // 25 hours old
+    const futureBackupTimestamp = new Date(now + 10 * 60 * 1000).toISOString(); // 10 minutes in future
+
+    // 1. Missing environment token
+    delete process.env.MIGRATION_EXECUTION_TOKEN;
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
-          authorizationToken: 'WRONG_TOKEN',
-          verifiedBackupId: 'gs://chat-app-28ac0-backups/2026-11-22',
-          verifiedBackupTimestamp: '2026-11-22T00:00:00.000Z',
+          authorizationToken: 'SOME_TOKEN',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: true,
           targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
         });
       },
       /MIGRATION_BLOCKED: Missing or invalid execution authorization token/
     );
 
-    // 2. Rejects when backup ID is missing
+    // 2. Incorrect environment token
+    process.env.MIGRATION_EXECUTION_TOKEN = 'CORRECT_TOKEN_123';
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
-          authorizationToken: 'VALID_SECRET_TOKEN_123',
-          verifiedBackupId: '',
-          verifiedBackupTimestamp: '2026-11-22T00:00:00.000Z',
+          authorizationToken: 'WRONG_TOKEN_XYZ',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: true,
           targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
         });
       },
-      /MIGRATION_BLOCKED: Must provide a verified backup ID/
+      /MIGRATION_BLOCKED: Missing or invalid execution authorization token/
     );
 
-    // 3. Rejects when backup timestamp is invalid
+    // 3. Missing backup ID
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
-          authorizationToken: 'VALID_SECRET_TOKEN_123',
-          verifiedBackupId: 'gs://chat-app-28ac0-backups/2026-11-22',
-          verifiedBackupTimestamp: 'invalid-date',
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: '',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: true,
           targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
+        });
+      },
+      /MIGRATION_BLOCKED: Must provide a backup ID/
+    );
+
+    // 4. Invalid backup timestamp
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: 'invalid-iso-date',
+          operatorBackupAttestation: true,
+          targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
         });
       },
       /MIGRATION_BLOCKED: Must provide a valid ISO timestamp/
     );
 
-    // 4. Rejects when targeting production project without ALLOW_PRODUCTION_MIGRATION
+    // 5. Backup timestamp older than 24 hours
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: staleBackupTimestamp,
+          operatorBackupAttestation: true,
+          targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
+        });
+      },
+      /MIGRATION_BLOCKED: Backup timestamp is older than 24 hours/
+    );
+
+    // 6. Future backup timestamp
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: futureBackupTimestamp,
+          operatorBackupAttestation: true,
+          targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
+        });
+      },
+      /MIGRATION_BLOCKED: Backup timestamp cannot be in the future/
+    );
+
+    // Missing operator attestation
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: false,
+          targetProjectId: 'staging-project',
+          activeProjectId: 'staging-project',
+          nowMs: now,
+        });
+      },
+      /MIGRATION_BLOCKED: Operator must explicitly certify out-of-band backup verification/
+    );
+
+    // 7. Active Firebase project differs from targetProjectId
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: true,
+          targetProjectId: 'staging-project-expected',
+          activeProjectId: 'different-project-actual',
+          nowMs: now,
+        });
+      },
+      /MIGRATION_BLOCKED: Target project ID "staging-project-expected" does not match active Firebase project "different-project-actual"/
+    );
+
+    // 8. Production project is rejected without explicit authorization
     delete process.env.ALLOW_PRODUCTION_MIGRATION;
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
-          authorizationToken: 'VALID_SECRET_TOKEN_123',
-          verifiedBackupId: 'gs://chat-app-28ac0-backups/2026-11-22',
-          verifiedBackupTimestamp: '2026-11-22T00:00:00.000Z',
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://chat-app-28ac0-backups/2026-11-22',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: true,
           targetProjectId: 'chat-app-28ac0',
+          activeProjectId: 'chat-app-28ac0',
+          nowMs: now,
         });
       },
       /PRODUCTION_MIGRATION_LOCKED/
     );
+
+    // 9. Production project cannot be bypassed by supplying a false staging target
+    await assert.rejects(
+      async () => {
+        await executeParticipantEmailSanitization(mockFirestore, {
+          authorizationToken: 'CORRECT_TOKEN_123',
+          backupId: 'gs://staging-backups/2026-11-22',
+          backupTimestamp: freshBackupTimestamp,
+          operatorBackupAttestation: true,
+          targetProjectId: 'fake-staging-target',
+          activeProjectId: 'chat-app-28ac0',
+          nowMs: now,
+        });
+      },
+      /MIGRATION_BLOCKED: Target project ID "fake-staging-target" does not match active Firebase project "chat-app-28ac0"/
+    );
+
+    // 10. Verified non-production configuration follows the permitted execution path
+    const result = await executeParticipantEmailSanitization(mockFirestore, {
+      authorizationToken: 'CORRECT_TOKEN_123',
+      backupId: 'gs://staging-backups/2026-11-22',
+      backupTimestamp: freshBackupTimestamp,
+      operatorBackupAttestation: true,
+      targetProjectId: 'staging-project-test',
+      activeProjectId: 'staging-project-test',
+      nowMs: now,
+    });
+    assert.strictEqual(result.dryRun, false);
+    assert.strictEqual(result.totalScanned, 0);
 
     // Clean up test environment
     delete process.env.MIGRATION_EXECUTION_TOKEN;

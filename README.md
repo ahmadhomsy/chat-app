@@ -214,10 +214,26 @@ The test suite contains **160 automated tests** across six distinct test suites:
      - Current member cannot modify document ID, email, role, provider, or server-authoritative presence fields (`isOnline`, `lastSeen`).
      - Group administrator can remove a member using the intended secure atomic operation (parent update + subdoc delete).
      - Normal member cannot delete a participant document or perform administrator operations.
-   - **Live Emulator Concurrency & Migration Verification (Phase 4.3 & Phase 4.3.1)**:
+   - **Unique Participant IDs & Membership Integrity (Phase 4.3.2)**:
+     - Valid group with unique member UIDs succeeds on creation.
+     - Group creation with duplicate participant UIDs is rejected (`toSet().size() == size()`).
+     - Group creation with duplicate admin UIDs is rejected (`toSet().size() == size()`).
+     - Group creation with 100 unique members succeeds.
+     - Group updates with duplicate participant or admin IDs are rejected.
+     - Direct conversation with duplicate participant IDs fails (self-conversation rejected; `toSet().size() == 2` & `pIds[0] != pIds[1]`).
+     - Normal valid direct conversation with two distinct UIDs continues to work with deterministic ID (`min_max`).
+   - **Atomic Participant Removal Guard (Phase 4.3.2)**:
+     - Standalone deletion of a participant subcollection document alone fails.
+     - Atomic batch updating parent membership and deleting participant document succeeds.
+     - Administrator cannot remove the last remaining valid administrator.
+     - Administrator cannot leave a removed admin inside `adminIds`.
+     - Removed member loses parent conversation read access and subcollection access.
+     - Remaining members retain normal read and message operations.
+   - **Live Emulator Concurrency & Migration Verification (Phase 4.3, Phase 4.3.1 & Phase 4.3.2)**:
      - Search Rate Limiter: 20 concurrent requests against Firestore emulator enforce max 15 requests, 5 get `resource-exhausted`, timestamps array bounded.
      - Legacy Email Migration: audit scanner identifies affected docs across batches with zero writes in dry-run mode against emulator.
      - True Presence Concurrency Barrier: competing transactions execute concurrently against emulator with synchronized latch; monotonic microsecond ordering guarantees newer state commits while older transition aborts without state inversion.
+     - Operational Migration Guard: active project identity verification, 24-hour backup freshness bounds, and operator attestation requirements.
 
 ### Run Verification Commands
 
@@ -234,7 +250,7 @@ flutter test
 # 4. Cloud Functions Build, Lint & Unit Tests (44 tests)
 cd functions && npm run build && npm run lint && npm test && cd ..
 
-# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (54 tests)
+# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (71 tests)
 cd functions && firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
 ```
 

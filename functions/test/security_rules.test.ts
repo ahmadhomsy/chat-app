@@ -1244,7 +1244,7 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
 
     const now = Date.now();
     const executeWithLockRetry = async (): Promise<{ success: boolean; code: any }> => {
-      for (let attempt = 0; attempt < 10; attempt++) {
+      for (let attempt = 0; attempt < 30; attempt++) {
         try {
           await enforceSearchRateLimit(adminDb, callerUid, now, 15, 60000);
           return { success: true, code: null };
@@ -1252,9 +1252,14 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
           if (err.code === 'resource-exhausted') {
             return { success: false, code: 'resource-exhausted' };
           }
-          // On emulator lock timeout or grpc abort, retry with backoff
-          if (err.message?.includes('lock timeout') || err.code === 10 || err.code === 'aborted') {
-            await new Promise((r) => setTimeout(r, 50 * (attempt + 1)));
+          // On emulator lock timeout or grpc abort, retry with backoff and jitter
+          if (
+            err.message?.toLowerCase().includes('lock timeout') ||
+            err.message?.includes('ABORTED') ||
+            err.code === 10 ||
+            err.code === 'aborted'
+          ) {
+            await new Promise((r) => setTimeout(r, 20 + Math.random() * 30 * (attempt + 1)));
             continue;
           }
           return { success: false, code: err.code };
@@ -1822,5 +1827,392 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     batch.delete(doc(aliceDb, 'conversations', 'group_admin_remove_member', 'participants', 'bob'));
 
     await assertSucceeds(batch.commit());
+  });
+
+  // =========================================================================
+  // Phase 4.3.2: Unique Participant IDs & Atomic Removal Tests (Sections 3 & 4)
+  // =========================================================================
+
+  // Section 3: Unique Participant IDs
+  it('55. A valid group with unique member UIDs succeeds on creation', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'group_valid_unique'), {
+        type: 'group',
+        groupName: 'Unique Team',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('56. Group creation with duplicate participant UIDs fails', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    // 2-member list with duplicates: ['alice', 'alice']
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_dup_pids_1'), {
+        type: 'group',
+        groupName: 'Duplicate Test 1',
+        participantIds: ['alice', 'alice'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+    // 3-member list with duplicate: ['alice', 'bob', 'alice']
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_dup_pids_2'), {
+        type: 'group',
+        groupName: 'Duplicate Test 2',
+        participantIds: ['alice', 'bob', 'alice'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('57. Group creation with duplicate admin UIDs fails', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_dup_admin_ids'), {
+        type: 'group',
+        groupName: 'Duplicate Admin Test',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice', 'alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('58. A valid group of 100 unique members succeeds', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const pIds = ['alice'];
+    for (let i = 2; i <= 100; i++) {
+      pIds.push(`user_${i}`);
+    }
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'group_100_unique'), {
+        type: 'group',
+        groupName: 'Centum Group',
+        participantIds: pIds,
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('59. Updating a valid group with duplicate participant IDs fails', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_update_dup_pids'), {
+        type: 'group',
+        groupName: 'Update Dup Test',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_update_dup_pids'), {
+        participantIds: ['alice', 'bob', 'alice'],
+      })
+    );
+  });
+
+  it('60. Updating a valid group with duplicate admin IDs fails', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_update_dup_admins'), {
+        type: 'group',
+        groupName: 'Update Dup Admin Test',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_update_dup_admins'), {
+        adminIds: ['alice', 'bob', 'alice'],
+      })
+    );
+  });
+
+  it('61. Direct conversation with duplicate participant IDs fails (self-conversation rejected)', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_alice'), {
+        type: 'direct',
+        participantIds: ['alice', 'alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('62. Normal valid direct conversation with two distinct UIDs continues to work', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    await assertSucceeds(
+      setDoc(doc(aliceDb, 'conversations', 'alice_charlie'), {
+        type: 'direct',
+        participantIds: ['alice', 'charlie'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  // Section 4: Atomic Participant Removal
+  it('63. Administrator deleting another participant document alone (standalone deletion) fails', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_standalone_del'), {
+        type: 'group',
+        groupName: 'Standalone Delete Test',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_standalone_del', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    // Standalone deletion without updating parent conversation participantIds MUST fail
+    await assertFails(
+      deleteDoc(doc(aliceDb, 'conversations', 'group_standalone_del', 'participants', 'bob'))
+    );
+  });
+
+  it('64. Administrator updating parent membership and deleting the participant document in one atomic batch succeeds', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_atomic_del_ok'), {
+        type: 'group',
+        groupName: 'Atomic Delete Success Test',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_atomic_del_ok', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const batch = writeBatch(aliceDb);
+    batch.update(doc(aliceDb, 'conversations', 'group_atomic_del_ok'), {
+      participantIds: ['alice', 'charlie'],
+    });
+    batch.delete(doc(aliceDb, 'conversations', 'group_atomic_del_ok', 'participants', 'bob'));
+    await assertSucceeds(batch.commit());
+  });
+
+  it('65. Administrator cannot remove the last remaining valid administrator', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_remove_last_admin'), {
+        type: 'group',
+        groupName: 'Last Admin Protection',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'], // Alice is sole admin
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_remove_last_admin', 'participants', 'alice'), {
+        id: 'alice',
+        name: 'Alice Sole Admin',
+        photoUrl: null,
+        isOnline: true,
+      });
+    });
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    // Alice attempts atomic batch removing herself leaving no valid admin
+    const batch = writeBatch(aliceDb);
+    batch.update(doc(aliceDb, 'conversations', 'group_remove_last_admin'), {
+      participantIds: ['bob'],
+      adminIds: [],
+    });
+    batch.delete(doc(aliceDb, 'conversations', 'group_remove_last_admin', 'participants', 'alice'));
+    await assertFails(batch.commit());
+  });
+
+  it('66. Administrator cannot leave a removed admin inside adminIds', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_phantom_removal'), {
+        type: 'group',
+        groupName: 'Phantom Admin Prevention',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice', 'bob'], // Alice and Bob are admins
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_phantom_removal', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Admin',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    // Alice removes Bob from participantIds and deletes his participant doc, but leaves Bob in adminIds
+    const batch = writeBatch(aliceDb);
+    batch.update(doc(aliceDb, 'conversations', 'group_phantom_removal'), {
+      participantIds: ['alice', 'charlie'],
+    });
+    batch.delete(doc(aliceDb, 'conversations', 'group_phantom_removal', 'participants', 'bob'));
+    await assertFails(batch.commit());
+  });
+
+  it('67. Removed member loses parent conversation read access', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_access'), {
+        type: 'group',
+        groupName: 'Post Removal Access Check',
+        participantIds: ['alice', 'charlie'], // Bob was removed
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    // Bob attempts to read the conversation document
+    await assertFails(
+      getDoc(doc(bobDb, 'conversations', 'group_removed_access'))
+    );
+  });
+
+  it('68. Removed member loses participant subcollection access', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_subcol_access'), {
+        type: 'group',
+        groupName: 'Subcollection Access Check',
+        participantIds: ['alice', 'charlie'], // Bob removed
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_removed_subcol_access', 'participants', 'charlie'), {
+        id: 'charlie',
+        name: 'Charlie',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    // Bob cannot read Charlie's participant snapshot
+    await assertFails(
+      getDoc(doc(bobDb, 'conversations', 'group_removed_subcol_access', 'participants', 'charlie'))
+    );
+  });
+
+  it('69. Remaining members retain normal read and message operations after participant removal', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_remaining_ops'), {
+        type: 'group',
+        groupName: 'Remaining Ops Test',
+        participantIds: ['alice', 'charlie'], // Bob removed, Alice and Charlie remain
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_remaining_ops', 'participants', 'charlie'), {
+        id: 'charlie',
+        name: 'Charlie Member',
+        photoUrl: null,
+        isOnline: true,
+      });
+    });
+    const charlieDb = testEnv.authenticatedContext('charlie').firestore();
+    // Charlie can read the conversation
+    await assertSucceeds(
+      getDoc(doc(charlieDb, 'conversations', 'group_remaining_ops'))
+    );
+    // Charlie can send a message
+    await assertSucceeds(
+      setDoc(doc(charlieDb, 'conversations', 'group_remaining_ops', 'messages', 'msg_charlie_1'), {
+        senderId: 'charlie',
+        senderName: 'Charlie Member',
+        text: 'Hello team, still here!',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('70. Normal non-admin member cannot remove anyone', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_non_admin_remove'), {
+        type: 'group',
+        groupName: 'Non Admin Guard',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'], // Bob is normal member
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_non_admin_remove', 'participants', 'charlie'), {
+        id: 'charlie',
+        name: 'Charlie',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+    // Bob attempts to remove Charlie via batch
+    const batch = writeBatch(bobDb);
+    batch.update(doc(bobDb, 'conversations', 'group_non_admin_remove'), {
+      participantIds: ['alice', 'bob'],
+    });
+    batch.delete(doc(bobDb, 'conversations', 'group_non_admin_remove', 'participants', 'charlie'));
+    await assertFails(batch.commit());
+  });
+
+  it('71. Existing direct conversation creation and operation remain unaffected', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const danDb = testEnv.authenticatedContext('dan').firestore();
+    // Alice creates direct conversation with Dan ('alice' < 'dan' -> 'alice_dan')
+    const batch = writeBatch(aliceDb);
+    batch.set(doc(aliceDb, 'conversations', 'alice_dan'), {
+      type: 'direct',
+      participantIds: ['alice', 'dan'],
+      createdBy: 'alice',
+      createdAt: serverTimestamp(),
+    });
+    batch.set(doc(aliceDb, 'conversations', 'alice_dan', 'participants', 'alice'), {
+      id: 'alice',
+      name: 'Alice',
+      photoUrl: null,
+      isOnline: true,
+    });
+    batch.set(doc(aliceDb, 'conversations', 'alice_dan', 'participants', 'dan'), {
+      id: 'dan',
+      name: 'Dan',
+      photoUrl: null,
+      isOnline: false,
+    });
+    await assertSucceeds(batch.commit());
+
+    // Dan can read and send message
+    await assertSucceeds(
+      getDoc(doc(danDb, 'conversations', 'alice_dan'))
+    );
+    await assertSucceeds(
+      setDoc(doc(danDb, 'conversations', 'alice_dan', 'messages', 'direct_msg_unaffected'), {
+        senderId: 'dan',
+        text: 'Direct message working seamlessly',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
   });
 });

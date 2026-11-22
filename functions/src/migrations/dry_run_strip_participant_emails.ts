@@ -109,30 +109,80 @@ export async function auditLegacyParticipantEmails(
 
 export interface MigrationExecutionOptions {
   authorizationToken: string;
-  verifiedBackupId: string;
-  verifiedBackupTimestamp: string;
+  verifiedBackupId?: string;
+  backupId?: string;
+  verifiedBackupTimestamp?: string;
+  backupTimestamp?: string;
   targetProjectId: string;
   batchSize?: number;
+  /**
+   * Explicit operator attestation certifying that a complete, valid Firestore export was
+   * independently verified out-of-band in Google Cloud Storage before executing live migration.
+   */
+  operatorBackupAttestation?: boolean;
+  /**
+   * Injected active project identity for deterministic testability and verification.
+   * If omitted, resolved from the initialized Firebase Admin app or environment.
+   */
+  activeProjectId?: string;
+  /**
+   * Reference clock in epoch milliseconds for deterministic boundary testing (defaults to Date.now()).
+   */
+  nowMs?: number;
+}
+
+/**
+ * Resolves the active Firebase project ID from Admin app configuration or environment.
+ */
+export function resolveActiveProjectId(
+  firestore: admin.firestore.Firestore,
+  injectedProjectId?: string
+): string {
+  if (injectedProjectId && injectedProjectId.trim().length > 0) {
+    return injectedProjectId.trim();
+  }
+  const app = (firestore as any)?.app;
+  if (app?.options?.projectId) {
+    return app.options.projectId;
+  }
+  if (admin.apps.length > 0 && admin.app()?.options?.projectId) {
+    return admin.app().options.projectId!;
+  }
+  if (process.env.GCLOUD_PROJECT && process.env.GCLOUD_PROJECT.trim().length > 0) {
+    return process.env.GCLOUD_PROJECT.trim();
+  }
+  if (process.env.FIREBASE_CONFIG) {
+    try {
+      const cfg = JSON.parse(process.env.FIREBASE_CONFIG);
+      if (cfg.projectId) return cfg.projectId;
+    } catch (_) {
+      // Ignore JSON parse error
+    }
+  }
+  return '';
 }
 
 /**
  * Separately gated operational migration execution process.
  *
- * SAFETY REQUIREMENTS FOR OPERATORS:
+ * SAFETY REQUIREMENTS & OPERATIONAL ATTESTATION:
  * - Destructive mutations are strictly locked by default.
  * - Requires an uncommitted execution token set via environment variable:
  *   process.env.MIGRATION_EXECUTION_TOKEN.
- * - Requires a documented backup identifier and timestamp. The operator MUST
- *   independently verify in Google Cloud Storage that a complete, valid Firestore
- *   export was successfully generated before initiating live migration.
- * - Requires explicit targetProjectId matching the active Firestore project.
- * - If targeting the production project ('chat-app-28ac0'), process.env.ALLOW_PRODUCTION_MIGRATION
- *   must be explicitly set to 'true'.
+ * - Requires documented backup identifier and ISO timestamp fresh within the previous 24 hours.
+ * - Future backup timestamps (> now) and stale timestamps (> 24 hours old) are strictly rejected.
+ * - Requires explicit operatorBackupAttestation: true certifying out-of-band GCS export verification.
+ *   (The script validates metadata and timestamp freshness; physical existence verification in GCS
+ *   is an operator attestation responsibility).
+ * - Compares caller targetProjectId against the actual active Firebase Admin project.
+ * - Accidental production runs cannot be bypassed by supplying a false staging target.
+ * - Production execution on 'chat-app-28ac0' requires process.env.ALLOW_PRODUCTION_MIGRATION === 'true'.
  */
 export async function executeParticipantEmailSanitization(
   firestore: admin.firestore.Firestore,
   options: MigrationExecutionOptions
 ): Promise<MigrationAuditResult> {
+  // 1. Authorization token verification
   const configuredToken = process.env.MIGRATION_EXECUTION_TOKEN;
   if (!configuredToken || options.authorizationToken !== configuredToken) {
     throw new Error(
@@ -140,31 +190,75 @@ export async function executeParticipantEmailSanitization(
     );
   }
 
-  if (!options.verifiedBackupId || options.verifiedBackupId.trim().length === 0) {
+  // 2. Backup ID verification (supports backupId or verifiedBackupId)
+  const backupId = options.backupId || options.verifiedBackupId;
+  if (!backupId || backupId.trim().length === 0) {
     throw new Error(
-      'MIGRATION_BLOCKED: Must provide a verified backup ID (e.g. gs://chat-app-28ac0-backups/2026-11-22).'
+      'MIGRATION_BLOCKED: Must provide a backup ID (e.g. gs://chat-app-28ac0-backups/2026-11-22).'
     );
   }
 
-  if (!options.verifiedBackupTimestamp || isNaN(Date.parse(options.verifiedBackupTimestamp))) {
+  // 3. Backup timestamp verification & freshness bounds (previous 24 hours)
+  const rawTimestamp = options.backupTimestamp || options.verifiedBackupTimestamp;
+  if (!rawTimestamp || isNaN(Date.parse(rawTimestamp))) {
     throw new Error(
       'MIGRATION_BLOCKED: Must provide a valid ISO timestamp for the verified backup.'
     );
   }
 
+  const parsedBackupTime = Date.parse(rawTimestamp);
+  const now = options.nowMs ?? Date.now();
+
+  // Reject future timestamps
+  if (parsedBackupTime > now) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Backup timestamp cannot be in the future.'
+    );
+  }
+
+  // Reject timestamps older than 24 hours (86,400,000 ms)
+  const maxBackupAgeMs = 24 * 60 * 60 * 1000;
+  if (now - parsedBackupTime > maxBackupAgeMs) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Backup timestamp is older than 24 hours (stale backup). A fresh backup taken within the last 24 hours is required.'
+    );
+  }
+
+  // 4. Explicit operator attestation check
+  if (options.operatorBackupAttestation !== true) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Operator must explicitly certify out-of-band backup verification via operatorBackupAttestation: true.'
+    );
+  }
+
+  // 5. Target project ID check
   if (!options.targetProjectId || options.targetProjectId.trim().length === 0) {
     throw new Error('MIGRATION_BLOCKED: Must provide targetProjectId.');
   }
 
-  // Production safety guard: block accidental production runs
-  if (options.targetProjectId === 'chat-app-28ac0' && process.env.ALLOW_PRODUCTION_MIGRATION !== 'true') {
+  // 6. Active Firebase project identity check (prevents bypass by supplying false target)
+  const activeProject = resolveActiveProjectId(firestore, options.activeProjectId);
+  if (!activeProject) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Unable to determine active Firebase project identity.'
+    );
+  }
+
+  if (options.targetProjectId !== activeProject) {
+    throw new Error(
+      `MIGRATION_BLOCKED: Target project ID "${options.targetProjectId}" does not match active Firebase project "${activeProject}".`
+    );
+  }
+
+  // 7. Production safety guard: checks active project directly
+  if (activeProject === 'chat-app-28ac0' && process.env.ALLOW_PRODUCTION_MIGRATION !== 'true') {
     throw new Error(
       'PRODUCTION_MIGRATION_LOCKED: Destructive migrations are disabled by default for production project "chat-app-28ac0". Requires ALLOW_PRODUCTION_MIGRATION="true".'
     );
   }
 
   console.log(
-    `[Migration] Operational execution authorized. Target Project: ${options.targetProjectId}, Backup ID: ${options.verifiedBackupId}, Backup Timestamp: ${options.verifiedBackupTimestamp}`
+    `[Migration] Operational execution authorized. Target Project: ${options.targetProjectId}, Backup ID: ${backupId}, Backup Timestamp: ${rawTimestamp}`
   );
 
   return auditLegacyParticipantEmails(firestore, {

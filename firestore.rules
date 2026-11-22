@@ -153,7 +153,16 @@ service cloud.firestore {
                     && (
                       (
                         request.resource.data.type == 'direct'
+                        && request.resource.data.participantIds is list
                         && request.resource.data.participantIds.size() == 2
+                        && request.resource.data.participantIds.toSet().size() == 2
+                        && request.resource.data.participantIds[0] != request.resource.data.participantIds[1]
+                        && request.resource.data.participantIds[0] is string
+                        && request.resource.data.participantIds[0].size() > 0
+                        && request.resource.data.participantIds[0].size() <= 128
+                        && request.resource.data.participantIds[1] is string
+                        && request.resource.data.participantIds[1].size() > 0
+                        && request.resource.data.participantIds[1].size() <= 128
                         && conversationId == (request.resource.data.participantIds[0] < request.resource.data.participantIds[1]
                            ? request.resource.data.participantIds[0] + '_' + request.resource.data.participantIds[1]
                            : request.resource.data.participantIds[1] + '_' + request.resource.data.participantIds[0])
@@ -163,9 +172,11 @@ service cloud.firestore {
                         && request.resource.data.participantIds is list
                         && request.resource.data.participantIds.size() >= 2
                         && request.resource.data.participantIds.size() <= 100
+                        && request.resource.data.participantIds.toSet().size() == request.resource.data.participantIds.size()
                         && request.resource.data.adminIds is list
                         && request.resource.data.adminIds.size() >= 1
                         && request.resource.data.adminIds.size() <= 100
+                        && request.resource.data.adminIds.toSet().size() == request.resource.data.adminIds.size()
                         && request.resource.data.participantIds.hasAll(request.resource.data.adminIds)
                         && request.auth.uid in request.resource.data.adminIds
                         && request.auth.uid in request.resource.data.participantIds
@@ -208,9 +219,11 @@ service cloud.firestore {
                             && request.resource.data.participantIds is list
                             && request.resource.data.participantIds.size() >= 2
                             && request.resource.data.participantIds.size() <= 100
+                            && request.resource.data.participantIds.toSet().size() == request.resource.data.participantIds.size()
                             && request.resource.data.adminIds is list
                             && request.resource.data.adminIds.size() >= 1
                             && request.resource.data.adminIds.size() <= 100
+                            && request.resource.data.adminIds.toSet().size() == request.resource.data.adminIds.size()
                             && request.resource.data.participantIds.hasAll(request.resource.data.adminIds)
                             && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['groupName']) || (request.resource.data.groupName is string && request.resource.data.groupName.size() > 0 && request.resource.data.groupName.size() <= 100))
                             && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
@@ -281,9 +294,19 @@ service cloud.firestore {
 
         // Delete:
         // - Authorized group admin removing a member
-        // Removed members, normal members, and outsider admins cannot delete
+        // - ATOMIC PARTICIPANT REMOVAL: Standalone deletion of a participant document alone is rejected.
+        // - Target participantUid must NOT be present in the post-write parent conversation's participantIds.
+        // - Post-write parent conversation must maintain valid group administration (at least 1 admin remaining).
+        // - Or if the parent conversation itself was deleted in the batch.
         allow delete: if isAuthenticated()
-                      && isGroupAdmin(getConversation(conversationId));
+                      && isGroupAdmin(getConversation(conversationId))
+                      && (
+                        (!existsAfter(/databases/$(database)/documents/conversations/$(conversationId)))
+                        || (
+                          !(participantUid in getConversationAfter(conversationId).participantIds)
+                          && isGroupAdmin(getConversationAfter(conversationId))
+                        )
+                      );
       }
 
       // Messages Subcollection
