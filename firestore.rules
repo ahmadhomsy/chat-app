@@ -36,6 +36,31 @@ service cloud.firestore {
              && request.auth.uid in conv.participantIds;
     }
 
+    // Validates administrator list integrity and last-usable-administrator invariant:
+    // - adminIds must be a list containing 1 to 100 unique administrators
+    // - Every administrator must belong to participantIds (adminIds subset of participantIds)
+    // - adminIds[0] must be a valid, non-empty string UID (size 1-128) belonging to participantIds,
+    //   guaranteeing that the group always retains at least one usable administrator who can authenticate
+    // - Up to 8 administrators are explicitly verified to be valid bounded string UIDs (size 1-128)
+    function isValidAdminList(adminIds, participantIds) {
+      return adminIds is list
+             && adminIds.size() >= 1
+             && adminIds.size() <= 100
+             && adminIds.toSet().size() == adminIds.size()
+             && participantIds.hasAll(adminIds)
+             && adminIds[0] is string
+             && adminIds[0].size() > 0
+             && adminIds[0].size() <= 128
+             && adminIds[0] in participantIds
+             && (adminIds.size() < 2 || (adminIds[1] is string && adminIds[1].size() > 0 && adminIds[1].size() <= 128))
+             && (adminIds.size() < 3 || (adminIds[2] is string && adminIds[2].size() > 0 && adminIds[2].size() <= 128))
+             && (adminIds.size() < 4 || (adminIds[3] is string && adminIds[3].size() > 0 && adminIds[3].size() <= 128))
+             && (adminIds.size() < 5 || (adminIds[4] is string && adminIds[4].size() > 0 && adminIds[4].size() <= 128))
+             && (adminIds.size() < 6 || (adminIds[5] is string && adminIds[5].size() > 0 && adminIds[5].size() <= 128))
+             && (adminIds.size() < 7 || (adminIds[6] is string && adminIds[6].size() > 0 && adminIds[6].size() <= 128))
+             && (adminIds.size() < 8 || (adminIds[7] is string && adminIds[7].size() > 0 && adminIds[7].size() <= 128));
+    }
+
     // Validates a single participant snapshot contract
     // hasOnly guarantees that ONLY id, name, photoUrl, isOnline, lastSeen can exist (rejects email, role, etc.)
     function isValidParticipantSnapshot(data) {
@@ -173,11 +198,7 @@ service cloud.firestore {
                         && request.resource.data.participantIds.size() >= 2
                         && request.resource.data.participantIds.size() <= 100
                         && request.resource.data.participantIds.toSet().size() == request.resource.data.participantIds.size()
-                        && request.resource.data.adminIds is list
-                        && request.resource.data.adminIds.size() >= 1
-                        && request.resource.data.adminIds.size() <= 100
-                        && request.resource.data.adminIds.toSet().size() == request.resource.data.adminIds.size()
-                        && request.resource.data.participantIds.hasAll(request.resource.data.adminIds)
+                        && isValidAdminList(request.resource.data.adminIds, request.resource.data.participantIds)
                         && request.auth.uid in request.resource.data.adminIds
                         && request.auth.uid in request.resource.data.participantIds
                         && request.resource.data.groupName is string
@@ -220,11 +241,7 @@ service cloud.firestore {
                             && request.resource.data.participantIds.size() >= 2
                             && request.resource.data.participantIds.size() <= 100
                             && request.resource.data.participantIds.toSet().size() == request.resource.data.participantIds.size()
-                            && request.resource.data.adminIds is list
-                            && request.resource.data.adminIds.size() >= 1
-                            && request.resource.data.adminIds.size() <= 100
-                            && request.resource.data.adminIds.toSet().size() == request.resource.data.adminIds.size()
-                            && request.resource.data.participantIds.hasAll(request.resource.data.adminIds)
+                            && isValidAdminList(request.resource.data.adminIds, request.resource.data.participantIds)
                             && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['groupName']) || (request.resource.data.groupName is string && request.resource.data.groupName.size() > 0 && request.resource.data.groupName.size() <= 100))
                             && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
                           )

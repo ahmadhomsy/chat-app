@@ -2337,19 +2337,249 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     );
   });
 
-  it('75. Group admin succession and membership operations require valid string administrator UIDs', async () => {
+  it('75. Group creation requires all administrators to be active participants (subset validation)', async () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
 
-    // Creating group where adminIds contains an outsider non-participant number fails (subset check)
+    // Creating group where adminIds contains an outsider non-participant fails (subset check)
     await assertFails(
-      setDoc(doc(aliceDb, 'conversations', 'group_invalid_admin_type'), {
+      setDoc(doc(aliceDb, 'conversations', 'group_outsider_admin_subset'), {
         type: 'group',
-        groupName: 'Invalid Admin Type Team',
+        groupName: 'Outsider Admin Team',
         participantIds: ['alice', 'bob'],
-        adminIds: ['alice', 9999 as any],
+        adminIds: ['alice', 9999 as any], // 9999 is outsider not in participantIds
         createdBy: 'alice',
         createdAt: serverTimestamp(),
       })
     );
+  });
+
+  it('76. An administrator cannot remove themselves while leaving only a non-string entry in adminIds (last-administrator protection)', async () => {
+    // Seed existing valid group where alice is sole admin and bob is member
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_last_admin_exploit'), {
+        type: 'group',
+        groupName: 'Last Admin Exploit Test',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_last_admin_exploit', 'participants', 'alice'), {
+        id: 'alice',
+        name: 'Alice Admin',
+        photoUrl: null,
+        isOnline: false,
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_last_admin_exploit', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob Member',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice attempts to update the group leaving only numeric 12345 as administrator
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_last_admin_exploit'), {
+        participantIds: ['bob', 12345 as any],
+        adminIds: [12345 as any],
+      })
+    );
+  });
+
+  it('77. Group creation and updates reject non-string administrator entries by type even when present in participantIds', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // 1. Creation attempt where non-string is included in both participantIds and adminIds
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_non_string_admin_create'), {
+        type: 'group',
+        groupName: 'Non-String Admin Create',
+        participantIds: ['alice', 'bob', 12345 as any],
+        adminIds: ['alice', 12345 as any],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // 2. Update attempt where non-string is placed at index 0 or index 1
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_non_string_admin_update'), {
+        type: 'group',
+        groupName: 'Non-String Admin Update',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_non_string_admin_update'), {
+        participantIds: ['alice', 'bob', 12345 as any],
+        adminIds: ['alice', 12345 as any],
+      })
+    );
+
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_non_string_admin_update'), {
+        participantIds: ['bob', 12345 as any],
+        adminIds: [12345 as any, 'bob'],
+      })
+    );
+  });
+
+  it('78. Group creation and updates reject empty string and oversized administrator UIDs', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // 1. Empty string administrator in creation
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_empty_admin_uid'), {
+        type: 'group',
+        groupName: 'Empty Admin UID',
+        participantIds: ['alice', ''],
+        adminIds: [''],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // 2. Oversized administrator (> 128 chars) in creation
+    const oversizedUid = 'a'.repeat(129);
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_oversized_admin_uid'), {
+        type: 'group',
+        groupName: 'Oversized Admin UID',
+        participantIds: ['alice', oversizedUid],
+        adminIds: [oversizedUid],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // 3. Update attempt with empty admin UID
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_admin_empty_str_update'), {
+        type: 'group',
+        groupName: 'Empty Str Update Group',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_admin_empty_str_update'), {
+        adminIds: [''],
+      })
+    );
+  });
+
+  it('79. Legitimate group administrator succession succeeds when the new administrator is a valid participant', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_valid_succession'), {
+        type: 'group',
+        groupName: 'Succession Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const bobDb = testEnv.authenticatedContext('bob').firestore();
+
+    // Alice transfers sole administrator rights to Bob
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'group_valid_succession'), {
+        adminIds: ['bob'],
+      })
+    );
+
+    // Bob is now the administrator and can update group metadata
+    await assertSucceeds(
+      updateDoc(doc(bobDb, 'conversations', 'group_valid_succession'), {
+        groupName: 'Succession Team - Managed by Bob',
+      })
+    );
+
+    // Alice is now a regular member and cannot perform admin operations
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_valid_succession'), {
+        groupName: 'Rogue Attempt by Alice',
+      })
+    );
+  });
+
+  it('80. The last usable administrator cannot leave the group without appointing a valid successor', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_sole_admin_leave'), {
+        type: 'group',
+        groupName: 'Sole Admin Leave Group',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice attempts to clear adminIds
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_sole_admin_leave'), {
+        adminIds: [],
+      })
+    );
+
+    // Alice attempts to set adminIds to non-participant outsider
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_sole_admin_leave'), {
+        adminIds: ['charlie_outsider'],
+      })
+    );
+  });
+
+  it('81. Atomic participant removal cannot leave the parent conversation in a malformed or administrator-less state', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_atomic_admin_malformed'), {
+        type: 'group',
+        groupName: 'Atomic Admin Integrity',
+        participantIds: ['alice', 'bob', 'charlie'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+      await setDoc(doc(context.firestore(), 'conversations', 'group_atomic_admin_malformed', 'participants', 'bob'), {
+        id: 'bob',
+        name: 'Bob',
+        photoUrl: null,
+        isOnline: false,
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Alice attempts atomic removal of Bob while leaving a non-string administrator
+    const malformedBatch = writeBatch(aliceDb);
+    malformedBatch.update(doc(aliceDb, 'conversations', 'group_atomic_admin_malformed'), {
+      participantIds: ['alice', 'charlie'],
+      adminIds: [12345 as any],
+    });
+    malformedBatch.delete(doc(aliceDb, 'conversations', 'group_atomic_admin_malformed', 'participants', 'bob'));
+    await assertFails(malformedBatch.commit());
+
+    // Alice executes valid atomic removal of Bob retaining valid administrator
+    const validBatch = writeBatch(aliceDb);
+    validBatch.update(doc(aliceDb, 'conversations', 'group_atomic_admin_malformed'), {
+      participantIds: ['alice', 'charlie'],
+      adminIds: ['alice'],
+    });
+    validBatch.delete(doc(aliceDb, 'conversations', 'group_atomic_admin_malformed', 'participants', 'bob'));
+    await assertSucceeds(validBatch.commit());
   });
 });

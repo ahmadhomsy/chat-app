@@ -125,19 +125,32 @@ export interface MigrationExecutionOptions {
 export const MAX_BACKUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours (86,400,000 ms)
 
 /**
- * Validates that a backup timestamp is a valid ISO 8601 string, not in the future,
- * and within the required 24-hour freshness window.
+ * Strict ISO 8601 timestamp regex requiring full date (YYYY-MM-DD), 'T' separator,
+ * time (HH:mm:ss), optional fractional seconds (.sss), and explicit timezone offset
+ * ('Z' or '+HH:mm' / '-HH:mm'). Non-ISO formats parseable by Date.parse are rejected.
+ */
+export const ISO_8601_TIMESTAMP_REGEX =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Validates that a backup timestamp is a strictly compliant ISO 8601 string with timezone,
+ * not in the future, and within the required 24-hour freshness window.
  *
- * @param rawTimestamp ISO 8601 timestamp string
+ * @param rawTimestamp ISO 8601 timestamp string with timezone (UTC or offset)
  * @param referenceTimeMs Reference timestamp (defaults to Date.now())
  */
 export function validateBackupTimestampFreshness(
   rawTimestamp?: string,
   referenceTimeMs: number = Date.now()
 ): number {
-  if (!rawTimestamp || isNaN(Date.parse(rawTimestamp))) {
+  if (
+    !rawTimestamp ||
+    typeof rawTimestamp !== 'string' ||
+    !ISO_8601_TIMESTAMP_REGEX.test(rawTimestamp) ||
+    isNaN(Date.parse(rawTimestamp))
+  ) {
     throw new Error(
-      'MIGRATION_BLOCKED: Must provide a valid ISO timestamp for the verified backup.'
+      'MIGRATION_BLOCKED: Must provide a valid ISO 8601 timestamp with timezone information for the verified backup (e.g. 2026-11-22T08:00:00.000Z or 2026-11-22T10:00:00.000+02:00).'
     );
   }
 
@@ -161,51 +174,84 @@ export function validateBackupTimestampFreshness(
 }
 
 /**
- * Resolves the active Firebase project ID strictly from trusted Admin app configuration
+ * Resolves the active Firebase project ID strictly from trusted Admin SDK configuration
  * or trusted runtime environment variables. Caller overrides are explicitly prohibited.
- * Fails closed if project identity cannot be verified or if configured sources conflict.
+ *
+ * Inspects all applicable trusted sources independently:
+ * 1. Admin App options attached to the supplied Firestore instance (or default app fallback
+ *    when the Firestore instance does not expose its project ID).
+ * 2. process.env.GCLOUD_PROJECT, when configured.
+ * 3. projectId parsed from process.env.FIREBASE_CONFIG, when configured (independent of GCLOUD_PROJECT).
+ *
+ * Requirements:
+ * - Compares all available, applicable trusted identity values.
+ * - Fails closed with MIGRATION_BLOCKED if any sources conflict.
+ * - Fails closed with MIGRATION_BLOCKED if configured FIREBASE_CONFIG is malformed or lacks usable projectId.
+ * - Fails closed if no trusted project identity can be determined.
+ * - Never infers identity from targetProjectId.
  */
 export function resolveActiveProjectId(firestore: admin.firestore.Firestore): string {
-  let appProject: string | undefined;
+  const detectedSources: { source: string; projectId: string }[] = [];
 
-  // 1. Primary: initialized Admin App options attached to firestore instance or default app
+  // 1. Primary: initialized Admin App options attached to firestore instance or default app fallback
+  let appProject: string | undefined;
   const app = (firestore as any)?.app;
-  if (app?.options?.projectId && typeof app.options.projectId === 'string') {
+  if (app?.options?.projectId && typeof app.options.projectId === 'string' && app.options.projectId.trim().length > 0) {
     appProject = app.options.projectId.trim();
-  } else if (admin.apps.length > 0 && admin.app()?.options?.projectId) {
+  } else if (!app && admin.apps && admin.apps.length > 0 && admin.app()?.options?.projectId) {
     appProject = admin.app()!.options.projectId!.trim();
   }
+  if (appProject) {
+    detectedSources.push({ source: 'Firebase Admin App', projectId: appProject });
+  }
 
-  // 2. Fallbacks: trusted environment variables
-  let envProject: string | undefined;
+  // 2. Environment: GCLOUD_PROJECT
   if (process.env.GCLOUD_PROJECT && process.env.GCLOUD_PROJECT.trim().length > 0) {
-    envProject = process.env.GCLOUD_PROJECT.trim();
-  } else if (process.env.FIREBASE_CONFIG) {
+    detectedSources.push({
+      source: 'GCLOUD_PROJECT',
+      projectId: process.env.GCLOUD_PROJECT.trim(),
+    });
+  }
+
+  // 3. Environment: FIREBASE_CONFIG (evaluated independently even when GCLOUD_PROJECT is present)
+  if (process.env.FIREBASE_CONFIG && process.env.FIREBASE_CONFIG.trim().length > 0) {
     try {
       const cfg = JSON.parse(process.env.FIREBASE_CONFIG);
-      if (cfg?.projectId && typeof cfg.projectId === 'string') {
-        envProject = cfg.projectId.trim();
+      if (cfg && typeof cfg.projectId === 'string' && cfg.projectId.trim().length > 0) {
+        detectedSources.push({
+          source: 'FIREBASE_CONFIG',
+          projectId: cfg.projectId.trim(),
+        });
+      } else {
+        throw new Error('Configured FIREBASE_CONFIG missing or empty "projectId" attribute');
       }
-    } catch (_) {
-      // Ignore JSON parse error
+    } catch (err: any) {
+      throw new Error(
+        `MIGRATION_BLOCKED: Malformed or unparseable FIREBASE_CONFIG environment variable: ${err.message}`
+      );
     }
   }
 
-  // Conflict detection: if both Admin App and environment report a project ID, they MUST match
-  if (appProject && envProject && appProject !== envProject) {
-    throw new Error(
-      `MIGRATION_BLOCKED: Conflicting Firebase project identity sources detected. Admin App configured with "${appProject}" but runtime environment reports "${envProject}".`
-    );
-  }
-
-  const resolved = appProject || envProject;
-  if (!resolved || resolved.length === 0) {
+  // Fail closed if no trusted identity sources are available
+  if (detectedSources.length === 0) {
     throw new Error(
       'MIGRATION_BLOCKED: Unable to determine active Firebase project identity from trusted Admin SDK configuration or runtime environment.'
     );
   }
 
-  return resolved;
+  // Conflict detection: all available sources must report the exact same project ID
+  const firstProject = detectedSources[0].projectId;
+  const hasConflict = detectedSources.some((s) => s.projectId !== firstProject);
+  if (hasConflict) {
+    const details = detectedSources
+      .map((s) => `${s.source}="${s.projectId}"`)
+      .join(', ');
+    throw new Error(
+      `MIGRATION_BLOCKED: Conflicting Firebase project identity sources detected. All configured identity sources must agree: ${details}.`
+    );
+  }
+
+  return firstProject;
 }
 
 /**

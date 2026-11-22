@@ -302,7 +302,7 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           targetProjectId: 'staging-project-test',
         });
       },
-      /MIGRATION_BLOCKED: Must provide a valid ISO timestamp/
+      /MIGRATION_BLOCKED: Must provide a valid ISO 8601 timestamp/
     );
 
     // 5. Backup timestamp older than 24 hours (tested against system clock in production execution path)
@@ -347,8 +347,55 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
       /MIGRATION_BLOCKED: Operator must explicitly certify out-of-band backup verification/
     );
 
-    // 8. Pure Helper Boundary Tests: validateBackupTimestampFreshness
-    const refTime = 1763780000000;
+    // 8. Pure Helper Format & Boundary Tests: validateBackupTimestampFreshness
+    const refTime = Date.parse('2026-11-22T12:00:00.000Z'); // 1795348800000
+    // Valid UTC with and without fractional seconds
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-11-22T08:00:00.000Z', refTime)
+    );
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-11-22T08:00:00Z', refTime)
+    );
+    // Valid timezone offsets (positive and negative)
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-11-22T10:00:00.000+02:00', refTime)
+    );
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-11-22T03:00:00.000-05:00', refTime)
+    );
+
+    // Non-ISO but JavaScript-parseable strings must be strictly rejected
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026/11/22 10:00:00', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('Sun Nov 22 2026 10:00:00 GMT', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-11-22 10:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-11-22', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-11-22T10:00:00', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+
+    // Invalid and empty values
+    assert.throws(
+      () => validateBackupTimestampFreshness('', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('not-a-timestamp', refTime),
+      /Must provide a valid ISO 8601 timestamp with timezone/
+    );
+
     // Exactly 24h boundary -> succeeds
     const exact24h = new Date(refTime - 24 * 60 * 60 * 1000).toISOString();
     assert.strictEqual(validateBackupTimestampFreshness(exact24h, refTime), refTime - 24 * 60 * 60 * 1000);
@@ -365,26 +412,63 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
       /Backup timestamp cannot be in the future/
     );
 
-    // 9. Independent project identity resolution: resolveActiveProjectId
-    // Resolves from firestore.app.options.projectId
-    assert.strictEqual(resolveActiveProjectId(mockFirestore), 'staging-project-test');
-    // Resolves from GCLOUD_PROJECT when app options are missing
+    // 9. Independent Project Identity Consensus: resolveActiveProjectId
     const firestoreNoApp: any = {};
-    process.env.GCLOUD_PROJECT = 'env-project-alpha';
-    assert.strictEqual(resolveActiveProjectId(firestoreNoApp), 'env-project-alpha');
-    delete process.env.GCLOUD_PROJECT;
-    // Detects conflict between Admin app and runtime environment
-    process.env.GCLOUD_PROJECT = 'conflicting-env-project';
-    assert.throws(
-      () => resolveActiveProjectId(mockFirestore),
-      /Conflicting Firebase project identity sources detected/
-    );
-    delete process.env.GCLOUD_PROJECT;
-    // Fails closed if no project identity can be resolved
-    assert.throws(
-      () => resolveActiveProjectId(firestoreNoApp),
-      /Unable to determine active Firebase project identity/
-    );
+    const origGcloud = process.env.GCLOUD_PROJECT;
+    const origFirebaseConfig = process.env.FIREBASE_CONFIG;
+
+    try {
+      // Mandatory Regression 1: Admin App = 'production-project', GCLOUD = 'production-project', FIREBASE_CONFIG = 'staging-project' -> REJECT
+      const prodAppFirestore: any = { app: { options: { projectId: 'production-project' } } };
+      process.env.GCLOUD_PROJECT = 'production-project';
+      process.env.FIREBASE_CONFIG = JSON.stringify({ projectId: 'staging-project' });
+      assert.throws(
+        () => resolveActiveProjectId(prodAppFirestore),
+        /Conflicting Firebase project identity sources detected/
+      );
+
+      // Mandatory Regression 2: No Admin App identity, GCLOUD = 'project-alpha', FIREBASE_CONFIG = 'project-beta' -> REJECT
+      process.env.GCLOUD_PROJECT = 'project-alpha';
+      process.env.FIREBASE_CONFIG = JSON.stringify({ projectId: 'project-beta' });
+      assert.throws(
+        () => resolveActiveProjectId(firestoreNoApp),
+        /Conflicting Firebase project identity sources detected/
+      );
+
+      // Mandatory Regression 3: All available sources agree -> RESOLVE
+      process.env.GCLOUD_PROJECT = 'consensus-project';
+      process.env.FIREBASE_CONFIG = JSON.stringify({ projectId: 'consensus-project' });
+      const consensusFirestore: any = { app: { options: { projectId: 'consensus-project' } } };
+      assert.strictEqual(resolveActiveProjectId(consensusFirestore), 'consensus-project');
+
+      // Agreement between GCLOUD and FIREBASE_CONFIG when no Admin App options present
+      assert.strictEqual(resolveActiveProjectId(firestoreNoApp), 'consensus-project');
+
+      // Mandatory Regression 4: Malformed or unusable FIREBASE_CONFIG -> FAIL CLOSED
+      process.env.FIREBASE_CONFIG = '{ invalid json string';
+      assert.throws(
+        () => resolveActiveProjectId(consensusFirestore),
+        /Malformed or unparseable FIREBASE_CONFIG/
+      );
+      process.env.FIREBASE_CONFIG = JSON.stringify({ databaseURL: 'https://db.firebaseio.com' }); // missing projectId
+      assert.throws(
+        () => resolveActiveProjectId(consensusFirestore),
+        /Configured FIREBASE_CONFIG missing or empty "projectId" attribute/
+      );
+
+      // Fails closed if no project identity can be resolved from any source
+      delete process.env.GCLOUD_PROJECT;
+      delete process.env.FIREBASE_CONFIG;
+      assert.throws(
+        () => resolveActiveProjectId(firestoreNoApp),
+        /Unable to determine active Firebase project identity/
+      );
+    } finally {
+      if (origGcloud !== undefined) process.env.GCLOUD_PROJECT = origGcloud;
+      else delete process.env.GCLOUD_PROJECT;
+      if (origFirebaseConfig !== undefined) process.env.FIREBASE_CONFIG = origFirebaseConfig;
+      else delete process.env.FIREBASE_CONFIG;
+    }
 
     // 10. Mandatory Regression Test: Production Admin App identity cannot be bypassed by caller
     // Mocked Firebase Admin project is explicitly set to production 'chat-app-28ac0'
@@ -420,6 +504,27 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
     );
     // Verify that NO database query or write occurred!
     assert.strictEqual(queryCount, 0, 'No query or mutation may execute when target mismatch occurs');
+
+    // 11. Mandatory Regression Test: Identity conflict prevents any Firestore query or mutation
+    try {
+      process.env.GCLOUD_PROJECT = 'conflicting-project-id';
+      queryCount = 0;
+      await assert.rejects(
+        async () => {
+          await executeParticipantEmailSanitization(mockFirestore, {
+            authorizationToken: 'CORRECT_TOKEN_123',
+            backupId: 'gs://staging-backups/2026-11-22',
+            backupTimestamp: freshBackupTimestamp,
+            operatorBackupAttestation: true,
+            targetProjectId: 'staging-project-test',
+          });
+        },
+        /Conflicting Firebase project identity sources detected/
+      );
+      assert.strictEqual(queryCount, 0, 'No query or mutation may execute when identity conflict occurs');
+    } finally {
+      delete process.env.GCLOUD_PROJECT;
+    }
 
     // 11. Mandatory Regression Test: Production project without ALLOW_PRODUCTION_MIGRATION is locked
     delete process.env.ALLOW_PRODUCTION_MIGRATION;
