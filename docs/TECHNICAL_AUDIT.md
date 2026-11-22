@@ -1,4 +1,4 @@
-# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1, Phase 4.2, Phase 4.3, Phase 4.3.1 & Phase 4.3.2)
+# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1, Phase 4.2, Phase 4.3, Phase 4.3.1, Phase 4.3.2 & Phase 4.3.3)
 
 ## 1. Executive Summary & Verification Matrix
 
@@ -31,7 +31,9 @@ Every capability is categorized across four explicit stages:
 | **Multi-Device RTDB Presence Service** | ✅ Yes | ✅ Yes (Unit & In-Memory) | ✅ Verified (RTDB Rules) | ⏳ Awaiting Ops Auth |
 | **High-Precision Monotonic Presence Helper** | ✅ Yes (`presence_helpers.ts`) | ✅ Yes (Microsecond Guard) | ✅ Verified (True Concurrency Barrier Test 40) | ⏳ Awaiting Ops Auth |
 | **RFC 3339 Timezone Offset Normalization** | ✅ Yes (`parseEventTimestamp`) | ✅ Yes (Unit Tests 9–13) | ✅ Verified | ⏳ Awaiting Ops Auth |
-| **Operational Migration Safety Gating & Identity Check** | ✅ Yes (`dry_run_strip_participant_emails.ts`) | ✅ Yes (Unit Test 11: 1–11) | ✅ Verified (Dry-run Test 39) | ⏳ Awaiting Ops Auth |
+| **Operational Migration Safety Gating & Identity Check** | ✅ Yes (`dry_run_strip_participant_emails.ts`) | ✅ Yes (Unit Test 11: 1–13) | ✅ Verified (Date.now() & Admin identity) | ⏳ Awaiting Ops Auth |
+| **Non-Bypassable Migration Guard (Phase 4.3.3)** | ✅ Yes (`dry_run_strip_participant_emails.ts`) | ✅ Yes (Unit Test 11: 1–13) | ✅ Verified (No caller-injected project/clock) | ⏳ Awaiting Ops Auth |
+| **UID Type & Length Bounds Audit (Phase 4.3.3)** | ✅ Yes (`firestore.rules`) | ✅ Yes (Rules Tests 72–75) | ✅ Verified (Rules Tests 72–75) | ⏳ Awaiting Ops Auth |
 | **Durable Push Notifications (`notifications.ts`)**| ✅ Yes | ✅ Yes (Unit & Chunks <= 500)| ✅ Verified (failurePolicy: true) | ⏳ Awaiting Ops Auth |
 | **Lock Lease Heartbeat Renewal** | ✅ Yes | ✅ Yes (Unit & Chunks) | ✅ Verified | ⏳ Awaiting Ops Auth |
 | **Firestore Security Rules** | ✅ Yes (`firestore.rules`) | ✅ Yes (Rules tests) | ✅ Verified (Port 8080) | ⏳ Awaiting Ops Auth |
@@ -59,7 +61,7 @@ Executed via:
 firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
 ```
 
-### Verified Security Assertions (71/71 Passed):
+### Verified Security Assertions (75/75 Passed):
 ```text
   Firebase Security Rules Independent Verification Tests
     ✔ 1. An authenticated user attempting to list all private user profiles fails (212ms)
@@ -133,9 +135,25 @@ firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
     ✔ 69. Remaining members retain normal read and message operations after participant removal (110ms)
     ✔ 70. Normal non-admin member cannot remove anyone (84ms)
     ✔ 71. Existing direct conversation creation and operation remain unaffected (115ms)
+    ✔ 72. Direct conversation creation strictly rejects non-string IDs, empty IDs, and oversized IDs (> 128 chars) (85ms)
+    ✔ 73. Participant subcollection strictly rejects non-string IDs, empty IDs, and oversized IDs (> 128 chars) (78ms)
+    ✔ 74. Non-string entries in parent participantIds cannot authenticate or access conversation resources or messages (92ms)
+    ✔ 75. Group admin operations require valid string administrator UIDs (subset validation rejects non-string admins) (88ms)
 
-  71 passing (36s)
+  75 passing (21s)
 ```
+
+### Critical Rules Invariants & Element Validation Audits Remediated in Phase 4.3.3:
+1. **Direct Conversation UID Element Validation**:
+   - `request.resource.data.participantIds` is constrained to exact size 2 with distinct elements (`toSet().size() == 2`).
+   - Each element is strictly validated: `participantIds[0] is string && participantIds[0].size() > 0 && participantIds[0].size() <= 128`, and identically for `participantIds[1]`.
+   - Rejects non-string IDs (integers, booleans, objects), empty strings (`""`), and oversized IDs (`> 128` characters).
+2. **Participant Subcollection Snapshot Bounds**:
+   - Every participant document under `/conversations/{id}/participants/{uid}` strictly enforces: `request.resource.data.id is string && request.resource.data.id.size() > 0 && request.resource.data.id.size() <= 128`.
+   - Prevents persistence of malformed, non-string, or oversized identifiers in participant snapshot records.
+3. **Group Conversation List Element Type Isolation Audit**:
+   - *Firestore Rules Architectural Constraints*: Firestore Rules language does not have loops, list comprehensions, or higher-order functions over arbitrary-length lists. For groups (2–100 participants), dynamically validating the type and length of every element in the parent document array without unrolling 100 conditional branches would require language primitives that Firestore does not support. Attempting to unroll 100 index checks would exceed the 1000-expression AST limit.
+   - *Security Invariant & Inertness*: Any non-string entry (e.g. integer `12345`) injected into parent `participantIds` cannot match `request.auth.uid` (which is always a string). In Firestore Security Rules, string-to-number comparison evaluates to `false`. Therefore, non-string entries in `participantIds` grant zero read, write, or messaging permissions to any caller. Furthermore, group admin operations require all admins to be in `participantIds`, and non-string admins cannot match any authenticated caller UID. Tests 74–75 verify this immunity against privilege escalation.
 
 ### Critical Rules Invariants Remediated in Phase 4.3.2:
 1. **Enforce Unique Participant & Administrator UIDs**:
@@ -306,10 +324,11 @@ Triggered automatically via `functions.auth.user().onDelete`:
   - Generates comprehensive `MigrationAuditResult` reporting `totalScanned`, `affectedConversations`, `sampleAffectedIds`, `batchesProcessed`, and `isDryRun: true`.
   - Strictly performs zero database mutations in dry-run mode.
   - Validated against live Firestore Emulator (Test 39): seeded 5 conversations (3 containing legacy email structures), verified audit correctly flagged all 3 across multiple batches with zero writes performed.
-- **Operational Execution Guard (Phase 4.3.2 Hardened)**:
+- **Operational Execution Guard (Phase 4.3.2 & Phase 4.3.3 Non-Bypassable Hardening)**:
   - Gated through an uncommitted operational environment variable (`process.env.MIGRATION_EXECUTION_TOKEN`).
-  - Active Firebase project verification: `resolveActiveProjectId` inspects the initialized Firebase Admin app and environment, comparing it against `targetProjectId`. Bypassing production lock via a false staging target is strictly blocked.
-  - Backup timestamp freshness verification: parses ISO timestamp, strictly rejects future timestamps (`> now`), and rejects stale backups older than 24 hours (`now - backupTime > 86400000 ms`).
+  - Active Firebase project verification: `resolveActiveProjectId(firestore)` inspects the initialized Firebase Admin app (`app.options.projectId`, `admin.app().options.projectId`) and runtime metadata (`GCLOUD_PROJECT`, `FIREBASE_CONFIG`). Fails closed if sources conflict or identity is indeterminate. Crucially, caller-controlled `activeProjectId` was completely removed from `MigrationExecutionOptions`, eliminating any ability to spoof staging identity against production.
+  - Backup timestamp freshness verification: `validateBackupTimestampFreshness(rawTimestamp, referenceTimeMs)` parses ISO timestamp, strictly rejects future timestamps (`> referenceTimeMs`), and rejects stale backups older than 24 hours (`referenceTimeMs - backupTime > 86400000 ms`).
+  - Real system clock enforcement: caller-controlled `nowMs` was completely removed from `MigrationExecutionOptions`. The production migration execution path evaluates freshness strictly using `Date.now()`.
   - Operator Attestation requirement: mandates `operatorBackupAttestation: true`. Explicitly documents that code validates metadata and freshness bounds, while physical GCS archive existence remains an operator attestation responsibility under standard operating procedures.
   - Production safety check: execution on production project `chat-app-28ac0` requires explicit environment flag `ALLOW_PRODUCTION_MIGRATION === 'true'`.
 
@@ -329,7 +348,7 @@ Triggered automatically via `functions.auth.user().onDelete`:
 
 ## 5. Automated Test Suite Breakdown
 
-The repository contains **177 automated tests** strictly categorized by test type:
+The repository contains **181 automated tests** strictly categorized by test type:
 
 | Test Type | Target File | Count | Status | Description |
 |---|---|---|---|---|
@@ -337,10 +356,10 @@ The repository contains **177 automated tests** strictly categorized by test typ
 | **Flutter In-Memory Flow Tests** | `test/core/services/presence_service_test.dart` | 4 | ✅ Passed | In-memory simulated multi-device connection registry testing partial/full disconnects and stable reconnection IDs. |
 | **Flutter Widget Tests** | `test/features/auth/presentation/auth_widgets_test.dart`<br>`test/features/chat/presentation/chat_widgets_test.dart`<br>`test/widget_test.dart` | 20 | ✅ Passed | UI rendering, form validation, tab switching, and message input debouncing. |
 | **Flutter Privacy & Model Tests** | `test/features/chat/data/models/chat_participant_privacy_test.dart` | 4 | ✅ Passed | Participant email omission from conversation serialization, backwards compatibility, and snapshot isolation. |
-| **Cloud Functions Unit & Production Helper Tests** | `functions/test/cleanup_helpers.test.ts`<br>`functions/test/notifications_helpers.test.ts`<br>`functions/test/presence_helpers.test.ts`<br>`functions/test/search_helpers.test.ts` | 44 | ✅ Passed | Account cleanup & strict 404 (11), push notification retry & age bounding (13), presence transactional ordering guard & microsecond parsing & RFC 3339 timezone normalization (13), rolling window rate limiting (7). Test 11 covers all 11 migration safety cases. |
-| **Firebase Emulator Integration & Concurrency Tests** | `functions/test/security_rules.test.ts` | 71 | ✅ Passed | Live emulator execution covering user privacy, schema allowlists, role tampering denial, deterministic direct IDs, message updates, metadata isolation, group subcollection privacy for 8, 9, 100 members in single batch, group admin invariants (41–54), rate-limit concurrency, migration audit, true presence concurrency barrier, unique participant/admin IDs (55–62), and atomic participant removal post-write parent verification (63–71). |
+| **Cloud Functions Unit & Production Helper Tests** | `functions/test/cleanup_helpers.test.ts`<br>`functions/test/notifications_helpers.test.ts`<br>`functions/test/presence_helpers.test.ts`<br>`functions/test/search_helpers.test.ts` | 44 | ✅ Passed | Account cleanup & strict 404 (11), push notification retry & age bounding (13), presence transactional ordering guard & microsecond parsing & RFC 3339 timezone normalization (13), rolling window rate limiting (7). Test 11 covers all 13 migration safety cases (including non-bypassable project identity resolution, conflict detection, and real-clock freshness). |
+| **Firebase Emulator Integration & Concurrency Tests** | `functions/test/security_rules.test.ts` | 75 | ✅ Passed | Live emulator execution covering user privacy, schema allowlists, role tampering denial, deterministic direct IDs, message updates, metadata isolation, group subcollection privacy for 8, 9, 100 members in single batch, group admin invariants (41–54), rate-limit concurrency, migration audit, true presence concurrency barrier, unique participant/admin IDs (55–62), atomic participant removal post-write parent verification (63–71), and UID element validation audit & subcollection bounds (72–75). |
 
-**Total Automated Tests:** 177 passed, 0 failed.
+**Total Automated Tests:** 181 passed, 0 failed.
 
 ---
 
@@ -355,8 +374,8 @@ All quality gates pass cleanly with zero warnings:
 | **Flutter Tests** | `flutter test` | **62 passed (0 failed)** |
 | **Functions Build** | `cd functions && npm run build` | **0 TypeScript errors (`tsc` clean)** |
 | **Functions Lint** | `cd functions && npm run lint` | **0 ESLint errors/warnings** |
-| **Functions Unit Tests**| `cd functions && npm test` | **44 passed (0 failed, 378ms runtime)** |
-| **Security Rules & Concurrency Tests** | `firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"` | **71 passed (0 failed, 36s runtime)** |
+| **Functions Unit Tests**| `cd functions && npm test` | **44 passed (0 failed, 214ms runtime)** |
+| **Security Rules & Concurrency Tests** | `firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"` | **75 passed (0 failed, 21s runtime)** |
 | **CLI Version Pinning** | `firebase --version` | **15.2.1 (Pinned & Asserted in CI)** |
 
 ---

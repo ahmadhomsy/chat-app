@@ -217,21 +217,35 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
   });
 
   it('11. Migration Execution Guard: enforces operational environment token, fresh backup bounds, project identity, and production safety lock', async () => {
-    const { executeParticipantEmailSanitization } = await import('../src/migrations/dry_run_strip_participant_emails');
+    const {
+      executeParticipantEmailSanitization,
+      resolveActiveProjectId,
+      validateBackupTimestampFreshness,
+    } = await import('../src/migrations/dry_run_strip_participant_emails');
+
+    let queryCount = 0;
     const mockFirestore: any = {
-      collection: () => ({
-        orderBy: () => ({
-          limit: () => ({
-            get: async () => ({ empty: true, docs: [], size: 0 }),
+      app: {
+        options: {
+          projectId: 'staging-project-test',
+        },
+      },
+      collection: () => {
+        queryCount++;
+        return {
+          orderBy: () => ({
+            limit: () => ({
+              get: async () => ({ empty: true, docs: [], size: 0 }),
+            }),
           }),
-        }),
-      }),
+        };
+      },
     };
 
-    const now = 1763780000000;
-    const freshBackupTimestamp = new Date(now - 2 * 3600 * 1000).toISOString(); // 2 hours old
-    const staleBackupTimestamp = new Date(now - 25 * 3600 * 1000).toISOString(); // 25 hours old
-    const futureBackupTimestamp = new Date(now + 10 * 60 * 1000).toISOString(); // 10 minutes in future
+    const realNow = Date.now();
+    const freshBackupTimestamp = new Date(realNow - 2 * 3600 * 1000).toISOString(); // 2 hours old
+    const staleBackupTimestamp = new Date(realNow - 25 * 3600 * 1000).toISOString(); // 25 hours old
+    const futureBackupTimestamp = new Date(realNow + 10 * 60 * 1000).toISOString(); // 10 minutes in future
 
     // 1. Missing environment token
     delete process.env.MIGRATION_EXECUTION_TOKEN;
@@ -242,9 +256,7 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: freshBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Missing or invalid execution authorization token/
@@ -259,9 +271,7 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: freshBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Missing or invalid execution authorization token/
@@ -275,9 +285,7 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: '',
           backupTimestamp: freshBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Must provide a backup ID/
@@ -291,15 +299,13 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: 'invalid-iso-date',
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Must provide a valid ISO timestamp/
     );
 
-    // 5. Backup timestamp older than 24 hours
+    // 5. Backup timestamp older than 24 hours (tested against system clock in production execution path)
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
@@ -307,15 +313,13 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: staleBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Backup timestamp is older than 24 hours/
     );
 
-    // 6. Future backup timestamp
+    // 6. Future backup timestamp (tested against system clock in production execution path)
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
@@ -323,15 +327,13 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: futureBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Backup timestamp cannot be in the future/
     );
 
-    // Missing operator attestation
+    // 7. Missing operator attestation
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
@@ -339,72 +341,125 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: freshBackupTimestamp,
           operatorBackupAttestation: false,
-          targetProjectId: 'staging-project',
-          activeProjectId: 'staging-project',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
         });
       },
       /MIGRATION_BLOCKED: Operator must explicitly certify out-of-band backup verification/
     );
 
-    // 7. Active Firebase project differs from targetProjectId
+    // 8. Pure Helper Boundary Tests: validateBackupTimestampFreshness
+    const refTime = 1763780000000;
+    // Exactly 24h boundary -> succeeds
+    const exact24h = new Date(refTime - 24 * 60 * 60 * 1000).toISOString();
+    assert.strictEqual(validateBackupTimestampFreshness(exact24h, refTime), refTime - 24 * 60 * 60 * 1000);
+    // 24h + 1ms -> fails
+    const over24h = new Date(refTime - 24 * 60 * 60 * 1000 - 1).toISOString();
+    assert.throws(
+      () => validateBackupTimestampFreshness(over24h, refTime),
+      /Backup timestamp is older than 24 hours/
+    );
+    // Future timestamp (1ms ahead) -> fails
+    const future1ms = new Date(refTime + 1).toISOString();
+    assert.throws(
+      () => validateBackupTimestampFreshness(future1ms, refTime),
+      /Backup timestamp cannot be in the future/
+    );
+
+    // 9. Independent project identity resolution: resolveActiveProjectId
+    // Resolves from firestore.app.options.projectId
+    assert.strictEqual(resolveActiveProjectId(mockFirestore), 'staging-project-test');
+    // Resolves from GCLOUD_PROJECT when app options are missing
+    const firestoreNoApp: any = {};
+    process.env.GCLOUD_PROJECT = 'env-project-alpha';
+    assert.strictEqual(resolveActiveProjectId(firestoreNoApp), 'env-project-alpha');
+    delete process.env.GCLOUD_PROJECT;
+    // Detects conflict between Admin app and runtime environment
+    process.env.GCLOUD_PROJECT = 'conflicting-env-project';
+    assert.throws(
+      () => resolveActiveProjectId(mockFirestore),
+      /Conflicting Firebase project identity sources detected/
+    );
+    delete process.env.GCLOUD_PROJECT;
+    // Fails closed if no project identity can be resolved
+    assert.throws(
+      () => resolveActiveProjectId(firestoreNoApp),
+      /Unable to determine active Firebase project identity/
+    );
+
+    // 10. Mandatory Regression Test: Production Admin App identity cannot be bypassed by caller
+    // Mocked Firebase Admin project is explicitly set to production 'chat-app-28ac0'
+    const prodFirestore: any = {
+      app: { options: { projectId: 'chat-app-28ac0' } },
+      collection: () => {
+        queryCount++;
+        return {
+          orderBy: () => ({
+            limit: () => ({
+              get: async () => ({ empty: true, docs: [], size: 0 }),
+            }),
+          }),
+        };
+      },
+    };
+
+    queryCount = 0;
+    // Malicious or mistaken caller supplies targetProjectId: 'staging-project' to try to bypass production check
     await assert.rejects(
       async () => {
-        await executeParticipantEmailSanitization(mockFirestore, {
+        await executeParticipantEmailSanitization(prodFirestore, {
           authorizationToken: 'CORRECT_TOKEN_123',
           backupId: 'gs://staging-backups/2026-11-22',
           backupTimestamp: freshBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'staging-project-expected',
-          activeProjectId: 'different-project-actual',
-          nowMs: now,
+          targetProjectId: 'staging-project',
+          // Even if caller attempts to inject an unauthorized activeProjectId key, it is ignored
+          ...({ activeProjectId: 'staging-project' } as any),
         });
       },
-      /MIGRATION_BLOCKED: Target project ID "staging-project-expected" does not match active Firebase project "different-project-actual"/
+      /MIGRATION_BLOCKED: Target project ID "staging-project" does not match active Firebase project "chat-app-28ac0"/
     );
+    // Verify that NO database query or write occurred!
+    assert.strictEqual(queryCount, 0, 'No query or mutation may execute when target mismatch occurs');
 
-    // 8. Production project is rejected without explicit authorization
+    // 11. Mandatory Regression Test: Production project without ALLOW_PRODUCTION_MIGRATION is locked
     delete process.env.ALLOW_PRODUCTION_MIGRATION;
     await assert.rejects(
       async () => {
-        await executeParticipantEmailSanitization(mockFirestore, {
+        await executeParticipantEmailSanitization(prodFirestore, {
           authorizationToken: 'CORRECT_TOKEN_123',
           backupId: 'gs://chat-app-28ac0-backups/2026-11-22',
           backupTimestamp: freshBackupTimestamp,
           operatorBackupAttestation: true,
           targetProjectId: 'chat-app-28ac0',
-          activeProjectId: 'chat-app-28ac0',
-          nowMs: now,
         });
       },
       /PRODUCTION_MIGRATION_LOCKED/
     );
+    assert.strictEqual(queryCount, 0, 'No query or mutation may execute when production locked');
 
-    // 9. Production project cannot be bypassed by supplying a false staging target
+    // 12. Mandatory Regression Test: Caller-controlled clock injection is impossible
+    // Supplying a stale timestamp (25h ago) cannot be bypassed by injecting a fabricated nowMs
     await assert.rejects(
       async () => {
         await executeParticipantEmailSanitization(mockFirestore, {
           authorizationToken: 'CORRECT_TOKEN_123',
           backupId: 'gs://staging-backups/2026-11-22',
-          backupTimestamp: freshBackupTimestamp,
+          backupTimestamp: staleBackupTimestamp,
           operatorBackupAttestation: true,
-          targetProjectId: 'fake-staging-target',
-          activeProjectId: 'chat-app-28ac0',
-          nowMs: now,
+          targetProjectId: 'staging-project-test',
+          ...({ nowMs: realNow + 100 * 3600 * 1000 } as any),
         });
       },
-      /MIGRATION_BLOCKED: Target project ID "fake-staging-target" does not match active Firebase project "chat-app-28ac0"/
+      /MIGRATION_BLOCKED: Backup timestamp is older than 24 hours/
     );
 
-    // 10. Verified non-production configuration follows the permitted execution path
+    // 13. Verified non-production configuration follows permitted execution path
     const result = await executeParticipantEmailSanitization(mockFirestore, {
       authorizationToken: 'CORRECT_TOKEN_123',
       backupId: 'gs://staging-backups/2026-11-22',
       backupTimestamp: freshBackupTimestamp,
       operatorBackupAttestation: true,
       targetProjectId: 'staging-project-test',
-      activeProjectId: 'staging-project-test',
-      nowMs: now,
     });
     assert.strictEqual(result.dryRun, false);
     assert.strictEqual(result.totalScanned, 0);

@@ -120,46 +120,92 @@ export interface MigrationExecutionOptions {
    * independently verified out-of-band in Google Cloud Storage before executing live migration.
    */
   operatorBackupAttestation?: boolean;
-  /**
-   * Injected active project identity for deterministic testability and verification.
-   * If omitted, resolved from the initialized Firebase Admin app or environment.
-   */
-  activeProjectId?: string;
-  /**
-   * Reference clock in epoch milliseconds for deterministic boundary testing (defaults to Date.now()).
-   */
-  nowMs?: number;
+}
+
+export const MAX_BACKUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours (86,400,000 ms)
+
+/**
+ * Validates that a backup timestamp is a valid ISO 8601 string, not in the future,
+ * and within the required 24-hour freshness window.
+ *
+ * @param rawTimestamp ISO 8601 timestamp string
+ * @param referenceTimeMs Reference timestamp (defaults to Date.now())
+ */
+export function validateBackupTimestampFreshness(
+  rawTimestamp?: string,
+  referenceTimeMs: number = Date.now()
+): number {
+  if (!rawTimestamp || isNaN(Date.parse(rawTimestamp))) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Must provide a valid ISO timestamp for the verified backup.'
+    );
+  }
+
+  const parsedBackupTime = Date.parse(rawTimestamp);
+
+  // Reject future timestamps
+  if (parsedBackupTime > referenceTimeMs) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Backup timestamp cannot be in the future.'
+    );
+  }
+
+  // Reject timestamps older than 24 hours
+  if (referenceTimeMs - parsedBackupTime > MAX_BACKUP_AGE_MS) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Backup timestamp is older than 24 hours (stale backup). A fresh backup taken within the last 24 hours is required.'
+    );
+  }
+
+  return parsedBackupTime;
 }
 
 /**
- * Resolves the active Firebase project ID from Admin app configuration or environment.
+ * Resolves the active Firebase project ID strictly from trusted Admin app configuration
+ * or trusted runtime environment variables. Caller overrides are explicitly prohibited.
+ * Fails closed if project identity cannot be verified or if configured sources conflict.
  */
-export function resolveActiveProjectId(
-  firestore: admin.firestore.Firestore,
-  injectedProjectId?: string
-): string {
-  if (injectedProjectId && injectedProjectId.trim().length > 0) {
-    return injectedProjectId.trim();
-  }
+export function resolveActiveProjectId(firestore: admin.firestore.Firestore): string {
+  let appProject: string | undefined;
+
+  // 1. Primary: initialized Admin App options attached to firestore instance or default app
   const app = (firestore as any)?.app;
-  if (app?.options?.projectId) {
-    return app.options.projectId;
+  if (app?.options?.projectId && typeof app.options.projectId === 'string') {
+    appProject = app.options.projectId.trim();
+  } else if (admin.apps.length > 0 && admin.app()?.options?.projectId) {
+    appProject = admin.app()!.options.projectId!.trim();
   }
-  if (admin.apps.length > 0 && admin.app()?.options?.projectId) {
-    return admin.app().options.projectId!;
-  }
+
+  // 2. Fallbacks: trusted environment variables
+  let envProject: string | undefined;
   if (process.env.GCLOUD_PROJECT && process.env.GCLOUD_PROJECT.trim().length > 0) {
-    return process.env.GCLOUD_PROJECT.trim();
-  }
-  if (process.env.FIREBASE_CONFIG) {
+    envProject = process.env.GCLOUD_PROJECT.trim();
+  } else if (process.env.FIREBASE_CONFIG) {
     try {
       const cfg = JSON.parse(process.env.FIREBASE_CONFIG);
-      if (cfg.projectId) return cfg.projectId;
+      if (cfg?.projectId && typeof cfg.projectId === 'string') {
+        envProject = cfg.projectId.trim();
+      }
     } catch (_) {
       // Ignore JSON parse error
     }
   }
-  return '';
+
+  // Conflict detection: if both Admin App and environment report a project ID, they MUST match
+  if (appProject && envProject && appProject !== envProject) {
+    throw new Error(
+      `MIGRATION_BLOCKED: Conflicting Firebase project identity sources detected. Admin App configured with "${appProject}" but runtime environment reports "${envProject}".`
+    );
+  }
+
+  const resolved = appProject || envProject;
+  if (!resolved || resolved.length === 0) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Unable to determine active Firebase project identity from trusted Admin SDK configuration or runtime environment.'
+    );
+  }
+
+  return resolved;
 }
 
 /**
@@ -169,12 +215,14 @@ export function resolveActiveProjectId(
  * - Destructive mutations are strictly locked by default.
  * - Requires an uncommitted execution token set via environment variable:
  *   process.env.MIGRATION_EXECUTION_TOKEN.
+ * - System clock is ALWAYS used to evaluate backup freshness; caller-controlled clock injection is prohibited.
  * - Requires documented backup identifier and ISO timestamp fresh within the previous 24 hours.
  * - Future backup timestamps (> now) and stale timestamps (> 24 hours old) are strictly rejected.
  * - Requires explicit operatorBackupAttestation: true certifying out-of-band GCS export verification.
  *   (The script validates metadata and timestamp freshness; physical existence verification in GCS
  *   is an operator attestation responsibility).
- * - Compares caller targetProjectId against the actual active Firebase Admin project.
+ * - Project identity is resolved strictly from trusted Admin SDK configuration/runtime metadata.
+ *   Caller targetProjectId is compared against this independently verified active project.
  * - Accidental production runs cannot be bypassed by supplying a false staging target.
  * - Production execution on 'chat-app-28ac0' requires process.env.ALLOW_PRODUCTION_MIGRATION === 'true'.
  */
@@ -198,31 +246,9 @@ export async function executeParticipantEmailSanitization(
     );
   }
 
-  // 3. Backup timestamp verification & freshness bounds (previous 24 hours)
+  // 3. Backup timestamp verification & freshness bounds (always evaluates against system clock)
   const rawTimestamp = options.backupTimestamp || options.verifiedBackupTimestamp;
-  if (!rawTimestamp || isNaN(Date.parse(rawTimestamp))) {
-    throw new Error(
-      'MIGRATION_BLOCKED: Must provide a valid ISO timestamp for the verified backup.'
-    );
-  }
-
-  const parsedBackupTime = Date.parse(rawTimestamp);
-  const now = options.nowMs ?? Date.now();
-
-  // Reject future timestamps
-  if (parsedBackupTime > now) {
-    throw new Error(
-      'MIGRATION_BLOCKED: Backup timestamp cannot be in the future.'
-    );
-  }
-
-  // Reject timestamps older than 24 hours (86,400,000 ms)
-  const maxBackupAgeMs = 24 * 60 * 60 * 1000;
-  if (now - parsedBackupTime > maxBackupAgeMs) {
-    throw new Error(
-      'MIGRATION_BLOCKED: Backup timestamp is older than 24 hours (stale backup). A fresh backup taken within the last 24 hours is required.'
-    );
-  }
+  validateBackupTimestampFreshness(rawTimestamp, Date.now());
 
   // 4. Explicit operator attestation check
   if (options.operatorBackupAttestation !== true) {
@@ -236,13 +262,8 @@ export async function executeParticipantEmailSanitization(
     throw new Error('MIGRATION_BLOCKED: Must provide targetProjectId.');
   }
 
-  // 6. Active Firebase project identity check (prevents bypass by supplying false target)
-  const activeProject = resolveActiveProjectId(firestore, options.activeProjectId);
-  if (!activeProject) {
-    throw new Error(
-      'MIGRATION_BLOCKED: Unable to determine active Firebase project identity.'
-    );
-  }
+  // 6. Active Firebase project identity check (strictly from Admin App/runtime, prevents bypass)
+  const activeProject = resolveActiveProjectId(firestore);
 
   if (options.targetProjectId !== activeProject) {
     throw new Error(

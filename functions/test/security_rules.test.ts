@@ -2215,4 +2215,141 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
       })
     );
   });
+
+  // =========================================================================
+  // Phase 4.3.3: Group UID Element Validation & Boundary Audit (Section 6)
+  // =========================================================================
+
+  it('72. Direct conversation rejects non-string, empty, or oversized participant IDs', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // 1. Non-string participant ID (e.g. number 123)
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_123'), {
+        type: 'direct',
+        participantIds: ['alice', 123 as any],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // 2. Empty string participant ID
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'alice_'), {
+        type: 'direct',
+        participantIds: ['alice', ''],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+
+    // 3. Excessively long participant UID (> 128 chars)
+    const longUid = 'u'.repeat(129);
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', `alice_${longUid}`), {
+        type: 'direct',
+        participantIds: ['alice', longUid],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('73. Participant subcollection strictly rejects non-string, empty, or oversized participant IDs', async () => {
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_uid_validation_audit'), {
+        type: 'group',
+        groupName: 'UID Audit Group',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // 1. Participant document with non-string id field
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_uid_validation_audit', 'participants', 'bob'), {
+        id: 9999 as any,
+        name: 'Bob Number ID',
+        photoUrl: null,
+        isOnline: false,
+      })
+    );
+
+    // 2. Participant document with empty string id
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_uid_validation_audit', 'participants', 'bob'), {
+        id: '',
+        name: 'Bob Empty ID',
+        photoUrl: null,
+        isOnline: false,
+      })
+    );
+
+    // 3. Participant document with excessively long id (> 128 chars)
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_uid_validation_audit', 'participants', 'bob'), {
+        id: 'b'.repeat(129),
+        name: 'Bob Long ID',
+        photoUrl: null,
+        isOnline: false,
+      })
+    );
+  });
+
+  it('74. Non-string entries in group participantIds cannot authenticate or access conversation resources', async () => {
+    // Seed group with numeric entry in participantIds to test security boundary
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_inert_numeric_entry'), {
+        type: 'group',
+        groupName: 'Inert Entry Group',
+        participantIds: ['alice', 12345 as any],
+        adminIds: ['alice'],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    // Authenticated user with string UID "12345"
+    const numericStringUserDb = testEnv.authenticatedContext('12345').firestore();
+
+    // String UID "12345" does NOT match numeric 12345 -> access denied
+    await assertFails(
+      getDoc(doc(numericStringUserDb, 'conversations', 'group_inert_numeric_entry'))
+    );
+
+    // Cannot read messages
+    await assertFails(
+      getDoc(doc(numericStringUserDb, 'conversations', 'group_inert_numeric_entry', 'messages', 'msg_1'))
+    );
+
+    // Cannot post messages
+    await assertFails(
+      setDoc(doc(numericStringUserDb, 'conversations', 'group_inert_numeric_entry', 'messages', 'msg_hack'), {
+        senderId: '12345',
+        text: 'Unauthorized attempt',
+        type: 'text',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
+
+  it('75. Group admin succession and membership operations require valid string administrator UIDs', async () => {
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+
+    // Creating group where adminIds contains an outsider non-participant number fails (subset check)
+    await assertFails(
+      setDoc(doc(aliceDb, 'conversations', 'group_invalid_admin_type'), {
+        type: 'group',
+        groupName: 'Invalid Admin Type Team',
+        participantIds: ['alice', 'bob'],
+        adminIds: ['alice', 9999 as any],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      })
+    );
+  });
 });

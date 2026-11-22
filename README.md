@@ -229,11 +229,18 @@ The test suite contains **160 automated tests** across six distinct test suites:
      - Administrator cannot leave a removed admin inside `adminIds`.
      - Removed member loses parent conversation read access and subcollection access.
      - Remaining members retain normal read and message operations.
-   - **Live Emulator Concurrency & Migration Verification (Phase 4.3, Phase 4.3.1 & Phase 4.3.2)**:
+   - **Non-Bypassable Migration Guard & UID Element Audit (Phase 4.3.3)**:
+     - Removed caller-controlled `activeProjectId` and `nowMs` from `MigrationExecutionOptions`.
+     - Active project identity resolved strictly from Admin App SDK and runtime environment with conflict detection.
+     - Backup timestamp freshness evaluated strictly against real system clock (`Date.now()`) with pure `validateBackupTimestampFreshness` helper.
+     - Direct conversation creation strictly rejects non-string IDs, empty IDs, and oversized IDs (> 128 chars).
+     - Participant subcollection documents strictly enforce string type and length bounds on participant IDs.
+     - Non-string parent list elements confirmed completely inert against string `request.auth.uid`.
+   - **Live Emulator Concurrency & Migration Verification (Phase 4.3, Phase 4.3.1, Phase 4.3.2 & Phase 4.3.3)**:
      - Search Rate Limiter: 20 concurrent requests against Firestore emulator enforce max 15 requests, 5 get `resource-exhausted`, timestamps array bounded.
      - Legacy Email Migration: audit scanner identifies affected docs across batches with zero writes in dry-run mode against emulator.
      - True Presence Concurrency Barrier: competing transactions execute concurrently against emulator with synchronized latch; monotonic microsecond ordering guarantees newer state commits while older transition aborts without state inversion.
-     - Operational Migration Guard: active project identity verification, 24-hour backup freshness bounds, and operator attestation requirements.
+     - Operational Migration Guard: non-bypassable project identity resolution, 24-hour backup freshness bounds against real clock, and operator attestation requirements.
 
 ### Run Verification Commands
 
@@ -250,7 +257,7 @@ flutter test
 # 4. Cloud Functions Build, Lint & Unit Tests (44 tests)
 cd functions && npm run build && npm run lint && npm test && cd ..
 
-# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (71 tests)
+# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (75 tests)
 cd functions && firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
 ```
 
