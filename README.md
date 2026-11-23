@@ -229,14 +229,15 @@ The test suite contains **160 automated tests** across six distinct test suites:
      - Administrator cannot leave a removed admin inside `adminIds`.
      - Removed member loses parent conversation read access and subcollection access.
      - Remaining members retain normal read and message operations.
-   - **Non-Bypassable Migration Guard & UID Element Audit (Phase 4.3.3 & Phase 4.3.4)**:
-     - Multi-source project identity consensus: `resolveActiveProjectId` inspects Admin App, `GCLOUD_PROJECT`, and `FIREBASE_CONFIG` independently; conflicts and malformed configs fail closed.
-     - Strict ISO 8601 backup timestamp format: `validateBackupTimestampFreshness` enforces ISO regex and timezone, rejecting parseable non-ISO dates.
+   - **Non-Bypassable Migration Guard & UID Element Audit (Phase 4.3.3, Phase 4.3.4 & Phase 4.3.4.1)**:
+     - Multi-source project identity consensus: `resolveActiveProjectId` inspects Admin App (with safe exact-name matching), `GCLOUD_PROJECT`, and `FIREBASE_CONFIG` independently; conflicts, empty/whitespace, and malformed configs fail closed.
+     - Strict ISO 8601 backup timestamp format & calendar semantics: `validateBackupTimestampFreshness` enforces ISO regex, timezone, and calendar validity via `isValidCalendarDateTime`, strictly rejecting impossible dates (e.g. Feb 31, non-leap Feb 29) normalized by JavaScript `Date.parse`.
      - Group administrator usability & succession guard: `isValidAdminList` guarantees `adminIds[0]` is a bounded string UID in `participantIds`, protecting the last usable administrator against non-string abandonment while preserving clean succession.
+     - Explicit administrator bounds checking for indexes 0–7; entries beyond index 7 cannot authenticate or escalate privileges.
      - Direct conversation creation strictly rejects non-string IDs, empty IDs, and oversized IDs (> 128 chars).
      - Participant subcollection documents strictly enforce string type and length bounds on participant IDs.
      - Non-string parent list elements confirmed completely inert against string `request.auth.uid`.
-   - **Live Emulator Concurrency & Migration Verification (Phase 4.3, Phase 4.3.1, Phase 4.3.2, Phase 4.3.3 & Phase 4.3.4)**:
+   - **Live Emulator Concurrency & Migration Verification (Phase 4.3, Phase 4.3.1, Phase 4.3.2, Phase 4.3.3, Phase 4.3.4 & Phase 4.3.4.1)**:
      - Search Rate Limiter: 20 concurrent requests against Firestore emulator enforce max 15 requests, 5 get `resource-exhausted`, timestamps array bounded.
      - Legacy Email Migration: audit scanner identifies affected docs across batches with zero writes in dry-run mode against emulator.
      - True Presence Concurrency Barrier: competing transactions execute concurrently against emulator with synchronized latch; monotonic microsecond ordering guarantees newer state commits while older transition aborts without state inversion.
@@ -257,8 +258,8 @@ flutter test
 # 4. Cloud Functions Build, Lint & Unit Tests (44 tests)
 cd functions && npm run build && npm run lint && npm test && cd ..
 
-# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (81 tests)
-cd functions && firebase emulators:exec --only "firestore,storage,database" "npm run test:rules" && cd ..
+# 5. Firebase Security Rules & Concurrency Tests against Live Emulators (82 tests)
+cd functions && firebase emulators:exec --project chat-app-28ac0 --only "firestore,storage,database" "npm run test:rules" && cd ..
 ```
 
 ---

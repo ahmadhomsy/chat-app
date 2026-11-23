@@ -1,4 +1,5 @@
 import * as assert from 'assert';
+import * as admin from 'firebase-admin';
 import {
   computeAdminSuccession,
   chunkDocuments,
@@ -364,6 +365,84 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
       validateBackupTimestampFreshness('2026-11-22T03:00:00.000-05:00', refTime)
     );
 
+    // Calendar Semantics Validation (Phase 4.3.4.1):
+    // JavaScript Date.parse normalizes impossible dates (e.g. Feb 31 -> March 3).
+    // validateBackupTimestampFreshness must strictly reject impossible calendar dates.
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-02-31T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-04-31T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-02-29T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+
+    // Leap year acceptance (2024 is a leap year; 2024-02-29 is valid)
+    const leapRefTime = Date.parse('2024-02-29T16:00:00.000Z');
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2024-02-29T12:00:00.000Z', leapRefTime)
+    );
+
+    // Valid end-of-month dates
+    const janRefTime = Date.parse('2026-01-31T16:00:00.000Z');
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-01-31T12:00:00Z', janRefTime)
+    );
+    const marRefTime = Date.parse('2026-03-31T16:00:00.000Z');
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-03-31T12:00:00Z', marRefTime)
+    );
+    const aprRefTime = Date.parse('2026-04-30T16:00:00.000Z');
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-04-30T12:00:00Z', aprRefTime)
+    );
+    const febRefTime = Date.parse('2026-02-28T16:00:00.000Z');
+    assert.doesNotThrow(() =>
+      validateBackupTimestampFreshness('2026-02-28T12:00:00Z', febRefTime)
+    );
+
+    // Invalid calendar components: month, day, hour, minute, second, offset
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-13-15T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-00-15T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-32T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-00T12:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-15T24:00:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-15T12:60:00Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-15T12:00:60Z', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-15T12:00:00+25:00', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+    assert.throws(
+      () => validateBackupTimestampFreshness('2026-05-15T12:00:00+05:60', refTime),
+      /Must provide a valid ISO 8601 timestamp with calendar-valid date/
+    );
+
     // Non-ISO but JavaScript-parseable strings must be strictly rejected
     assert.throws(
       () => validateBackupTimestampFreshness('2026/11/22 10:00:00', refTime),
@@ -455,6 +534,32 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
         () => resolveActiveProjectId(consensusFirestore),
         /Configured FIREBASE_CONFIG missing or empty "projectId" attribute/
       );
+
+      // Whitespace-only FIREBASE_CONFIG fails closed
+      process.env.FIREBASE_CONFIG = '   ';
+      assert.throws(
+        () => resolveActiveProjectId(consensusFirestore),
+        /Configured FIREBASE_CONFIG environment variable is empty or whitespace-only/
+      );
+
+      // Admin App exact name matching:
+      // When Firestore instance has app with empty projectId, resolves from admin.apps matching by exact name
+      const namedApp = admin.initializeApp({ projectId: 'matching-named-project' }, 'namedAdminApp');
+      try {
+        const firestoreWithNamedApp: any = { app: { name: 'namedAdminApp', options: {} } };
+        delete process.env.GCLOUD_PROJECT;
+        delete process.env.FIREBASE_CONFIG;
+        assert.strictEqual(resolveActiveProjectId(firestoreWithNamedApp), 'matching-named-project');
+
+        // App name not in admin.apps fails closed without inferring from unrelated named apps
+        const firestoreWithUnrelatedApp: any = { app: { name: 'otherApp', options: {} } };
+        assert.throws(
+          () => resolveActiveProjectId(firestoreWithUnrelatedApp),
+          /Unable to determine active Firebase project identity/
+        );
+      } finally {
+        await namedApp.delete();
+      }
 
       // Fails closed if no project identity can be resolved from any source
       delete process.env.GCLOUD_PROJECT;

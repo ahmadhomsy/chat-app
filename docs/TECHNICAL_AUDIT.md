@@ -1,4 +1,4 @@
-# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1, Phase 4.2, Phase 4.3, Phase 4.3.1, Phase 4.3.2, Phase 4.3.3 & Phase 4.3.4)
+# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1, Phase 4.2, Phase 4.3, Phase 4.3.1, Phase 4.3.2, Phase 4.3.3, Phase 4.3.4 & Phase 4.3.4.1)
 
 ## 1. Executive Summary & Verification Matrix
 
@@ -35,6 +35,9 @@ Every capability is categorized across four explicit stages:
 | **Non-Bypassable Migration Guard (Phase 4.3.3)** | ✅ Yes (`dry_run_strip_participant_emails.ts`) | ✅ Yes (Unit Test 11: 1–13) | ✅ Verified (No caller-injected project/clock) | ⏳ Awaiting Ops Auth |
 | **Project Identity Consensus (Phase 4.3.4)** | ✅ Yes (`resolveActiveProjectId`) | ✅ Yes (Unit Test 11: 9) | ✅ Verified (Independent consensus across Admin App, GCLOUD, and FIREBASE_CONFIG) | ⏳ Awaiting Ops Auth |
 | **Strict ISO 8601 Backup Timestamp Validation (Phase 4.3.4)** | ✅ Yes (`validateBackupTimestampFreshness`) | ✅ Yes (Unit Test 11: 8) | ✅ Verified (Rejects non-ISO JS dates; enforces timezone) | ⏳ Awaiting Ops Auth |
+| **Strict Calendar Semantics Validation (Phase 4.3.4.1)** | ✅ Yes (`isValidCalendarDateTime`) | ✅ Yes (Unit Test 11: 8) | ✅ Verified (Rejects impossible/normalized dates like Feb 31, leap-year aware) | ⏳ Awaiting Ops Auth |
+| **Firebase Identity Resolver Fallback & Whitespace Handling (Phase 4.3.4.1)** | ✅ Yes (`resolveActiveProjectId`) | ✅ Yes (Unit Test 11: 9) | ✅ Verified (Whitespace-only fails closed, exact Admin App matching) | ⏳ Awaiting Ops Auth |
+| **Clarified Group Admin Scope & Non-String Isolation (Phase 4.3.4.1)** | ✅ Yes (`isValidAdminList`) | ✅ Yes (Rules Test 82) | ✅ Verified (Indexes 0–7 bounded, adminIds[0] protected, non-string unable to auth) | ⏳ Awaiting Ops Auth |
 | **Group Admin Usability & Succession Invariants (Phase 4.3.4)** | ✅ Yes (`firestore.rules` - `isValidAdminList`) | ✅ Yes (Rules Tests 75–81) | ✅ Verified (Bounded string UIDs, last-admin protection, clean succession) | ⏳ Awaiting Ops Auth |
 | **UID Type & Length Bounds Audit (Phase 4.3.3 & Phase 4.3.4)** | ✅ Yes (`firestore.rules`) | ✅ Yes (Rules Tests 72–81) | ✅ Verified (Direct & Subcollection complete, Group Admin bounded) | ⏳ Awaiting Ops Auth |
 | **Durable Push Notifications (`notifications.ts`)**| ✅ Yes | ✅ Yes (Unit & Chunks <= 500)| ✅ Verified (failurePolicy: true) | ⏳ Awaiting Ops Auth |
@@ -64,7 +67,7 @@ Executed via:
 firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
 ```
 
-### Verified Security Assertions (81/81 Passed):
+### Verified Security Assertions (82/82 Passed):
 ```text
   Firebase Security Rules Independent Verification Tests
     ✔ 1. An authenticated user attempting to list all private user profiles fails (212ms)
@@ -148,9 +151,29 @@ firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
     ✔ 79. Legitimate group administrator succession succeeds when the new administrator is a valid participant (69ms)
     ✔ 80. The last usable administrator cannot leave the group without appointing a valid successor (42ms)
     ✔ 81. Atomic participant removal cannot leave the parent conversation in a malformed or administrator-less state (53ms)
+    ✔ 82. Administrator entries beyond index 7: non-string entry at index 8 cannot authenticate or gain administrative authority while adminIds[0] remains protected (68ms)
 
-  81 passing (25s)
+  82 passing (36s)
 ```
+
+### Critical Rules Invariants & Boundaries Remediated in Phase 4.3.4.1:
+1. **Strict Calendar Semantics Validation (`isValidCalendarDateTime`)**:
+   - *Previous Gap*: While ISO 8601 regex pattern and timezone offset presence were enforced in Phase 4.3.4, JavaScript's built-in `Date.parse()` normalizes impossible calendar dates (for example, `2026-02-31T12:00:00Z` is silently normalized into `March 3, 2026`).
+   - *Remediation*: Implemented `isValidCalendarDateTime(year, month, day, hour, minute, second, tz)` checking:
+     * 4-digit year (1970–9999).
+     * Month range (1–12).
+     * Day range per month with accurate leap-year handling: 31 days for months [1, 3, 5, 7, 8, 10, 12], 30 days for [4, 6, 9, 11], and 28 or 29 days for February (`(year % 4 === 0 && year % 100 !== 0) || year % 400 === 0`).
+     * Hours (0–23), minutes (0–59), seconds (0–59).
+     * Timezone offset hours (0–23) and minutes (0–59).
+     * Strictly rejects impossible dates (e.g. Feb 31, Apr 31, non-leap Feb 29) before calling `Date.parse()`.
+2. **Multi-Source Project Identity Consensus: Fallback & Whitespace Handling**:
+   - *Whitespace-Only `FIREBASE_CONFIG`*: When `process.env.FIREBASE_CONFIG` is configured but consists only of whitespace, it fails closed immediately with `MIGRATION_BLOCKED: Configured FIREBASE_CONFIG environment variable is empty or whitespace-only.`
+   - *Admin App Name Matching*: When the supplied Firestore instance exposes an `app` object without `options.projectId`, `resolveActiveProjectId()` safely looks up initialized Admin Apps in `admin.apps` matching `app.name` by exact name only. It never infers identity from an unrelated named Admin App, failing closed if no exact match is found.
+3. **Explicit Group Administrator Validation Boundaries (Indexes 0–7 vs 8–99)**:
+   - *Verification Scope*: `isValidAdminList(adminIds, participantIds)` explicitly validates string type and character length bounds (`size() > 0 && size() <= 128`) for administrator entries from index 0 through 7 (supporting up to 8 administrators with per-element bounds checking).
+   - *Firestore Rules AST Limit Boundary*: Due to Firestore Security Rules' expression and AST complexity limits (1,000 expression limit, absence of loops or map/fold operations), individual element type checks are not unrolled beyond index 7.
+   - *Protection of `adminIds[0]`*: `adminIds[0]` is independently verified to be a valid bounded string UID belonging to `participantIds`. This guarantees that even if a group has $\ge 9$ administrators, the primary administrator position (`adminIds[0]`) can never be displaced by a non-string entry, and an administrator cannot abandon the group leaving only non-string entries (Test 82).
+   - *Authentication & Authorization Immunity*: Any non-string entry in `adminIds` or `participantIds` (such as integer `99999`) cannot match `request.auth.uid` (which is always a string). In Firestore Security Rules, string-to-integer comparison strictly evaluates to `false`. A user attempting to authenticate as `"99999"` receives permission denied for all administrator operations, participant subcollection operations, and message reads/writes.
 
 ### Critical Rules Invariants & Architecture Remediated in Phase 4.3.4:
 1. **Group Administrator Usability & Last-Administrator Invariant (`isValidAdminList`)**:
@@ -380,7 +403,7 @@ Triggered automatically via `functions.auth.user().onDelete`:
 
 ## 5. Automated Test Suite Breakdown
 
-The repository contains **187 automated tests** strictly categorized by test type:
+The repository contains **188 automated tests** strictly categorized by test type:
 
 | Test Type | Target File | Count | Status | Description |
 |---|---|---|---|---|
@@ -388,10 +411,10 @@ The repository contains **187 automated tests** strictly categorized by test typ
 | **Flutter In-Memory Flow Tests** | `test/core/services/presence_service_test.dart` | 4 | ✅ Passed | In-memory simulated multi-device connection registry testing partial/full disconnects and stable reconnection IDs. |
 | **Flutter Widget Tests** | `test/features/auth/presentation/auth_widgets_test.dart`<br>`test/features/chat/presentation/chat_widgets_test.dart`<br>`test/widget_test.dart` | 20 | ✅ Passed | UI rendering, form validation, tab switching, and message input debouncing. |
 | **Flutter Privacy & Model Tests** | `test/features/chat/data/models/chat_participant_privacy_test.dart` | 4 | ✅ Passed | Participant email omission from conversation serialization, backwards compatibility, and snapshot isolation. |
-| **Cloud Functions Unit & Production Helper Tests** | `functions/test/cleanup_helpers.test.ts`<br>`functions/test/notifications_helpers.test.ts`<br>`functions/test/presence_helpers.test.ts`<br>`functions/test/search_helpers.test.ts` | 44 | ✅ Passed | Account cleanup & strict 404 (11), push notification retry & age bounding (13), presence transactional ordering guard & microsecond parsing & RFC 3339 timezone normalization (13), rolling window rate limiting (7). Test 11 covers all 13 migration safety cases (including multi-source project consensus, strict ISO timestamp format, conflict detection, and real-clock freshness). |
-| **Firebase Emulator Integration & Concurrency Tests** | `functions/test/security_rules.test.ts` | 81 | ✅ Passed | Live emulator execution covering user privacy, schema allowlists, role tampering denial, deterministic direct IDs, message updates, metadata isolation, group subcollection privacy for 8, 9, 100 members in single batch, group admin invariants (41–54), rate-limit concurrency, migration audit, true presence concurrency barrier, unique participant/admin IDs (55–62), atomic participant removal post-write parent verification (63–71), UID element validation audit & subcollection bounds (72–74), and group administrator usability, bounded string typing, last-admin protection, and succession (75–81). |
+| **Cloud Functions Unit & Production Helper Tests** | `functions/test/cleanup_helpers.test.ts`<br>`functions/test/notifications_helpers.test.ts`<br>`functions/test/presence_helpers.test.ts`<br>`functions/test/search_helpers.test.ts` | 44 | ✅ Passed | Account cleanup & strict 404 (11), push notification retry & age bounding (13), presence transactional ordering guard & microsecond parsing & RFC 3339 timezone normalization (13), rolling window rate limiting (7). Test 11 covers all 13 migration safety cases (including multi-source project consensus, strict ISO timestamp format, conflict detection, real-clock freshness, strict calendar validation, and Admin App name matching). |
+| **Firebase Emulator Integration & Concurrency Tests** | `functions/test/security_rules.test.ts` | 82 | ✅ Passed | Live emulator execution covering user privacy, schema allowlists, role tampering denial, deterministic direct IDs, message updates, metadata isolation, group subcollection privacy for 8, 9, 100 members in single batch, group admin invariants (41–54), rate-limit concurrency, migration audit, true presence concurrency barrier, unique participant/admin IDs (55–62), atomic participant removal post-write parent verification (63–71), UID element validation audit & subcollection bounds (72–74), group administrator usability, bounded string typing, last-admin protection, and succession (75–81), and explicit administrator index 0–7 boundary verification and non-string isolation (82). |
 
-**Total Automated Tests:** 187 passed, 0 failed.
+**Total Automated Tests:** 188 passed, 0 failed.
 
 ---
 
@@ -406,9 +429,8 @@ All quality gates pass cleanly with zero warnings:
 | **Flutter Tests** | `flutter test` | **62 passed (0 failed)** |
 | **Functions Build** | `cd functions && npm run build` | **0 TypeScript errors (`tsc` clean)** |
 | **Functions Lint** | `cd functions && npm run lint` | **0 ESLint errors/warnings** |
-| **Functions Unit Tests**| `cd functions && npm test` | **44 passed (0 failed, 225ms runtime)** |
-| **Security Rules & Concurrency Tests** | `firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"` | **81 passed (0 failed, 25s runtime)** |
-| **CLI Version Pinning** | `firebase --version` | **15.2.1 (Pinned & Asserted in CI)** |
+| **Functions Unit Tests**| `cd functions && npm test` | **44 passed (0 failed, 397ms runtime)** |
+| **Security Rules & Concurrency Tests** | `firebase emulators:exec --project chat-app-28ac0 --only "firestore,storage,database" "npm run test:rules"` | **82 passed (0 failed, 36s runtime)** |
 | **CLI Version Pinning** | `firebase --version` | **15.2.1 (Pinned & Asserted in CI)** |
 
 ---

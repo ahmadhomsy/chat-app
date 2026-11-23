@@ -130,11 +130,54 @@ export const MAX_BACKUP_AGE_MS = 24 * 60 * 60 * 1000; // 24 hours (86,400,000 ms
  * ('Z' or '+HH:mm' / '-HH:mm'). Non-ISO formats parseable by Date.parse are rejected.
  */
 export const ISO_8601_TIMESTAMP_REGEX =
-  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/;
+  /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:\d{2})$/;
+
+/**
+ * Validates actual calendar semantics for a date/time representation to prevent
+ * JavaScript Date normalization from accepting impossible calendar dates
+ * (e.g. Feb 31, Apr 31, or Feb 29 in non-leap years).
+ */
+export function isValidCalendarDateTime(
+  year: number,
+  month: number,
+  day: number,
+  hour: number,
+  minute: number,
+  second: number,
+  tz: string
+): boolean {
+  if (year < 1970 || year > 9999) return false;
+  if (month < 1 || month > 12) return false;
+
+  // Determine actual days in selected month with accurate leap-year handling
+  let maxDays = 31;
+  if (month === 4 || month === 6 || month === 9 || month === 11) {
+    maxDays = 30;
+  } else if (month === 2) {
+    const isLeapYear = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+    maxDays = isLeapYear ? 29 : 28;
+  }
+
+  if (day < 1 || day > maxDays) return false;
+  if (hour < 0 || hour > 23) return false;
+  if (minute < 0 || minute > 59) return false;
+  if (second < 0 || second > 59) return false;
+
+  if (tz !== 'Z') {
+    const offsetMatch = tz.match(/^([+-])(\d{2}):(\d{2})$/);
+    if (!offsetMatch) return false;
+    const tzHour = parseInt(offsetMatch[2], 10);
+    const tzMin = parseInt(offsetMatch[3], 10);
+    if (tzHour < 0 || tzHour > 23 || tzMin < 0 || tzMin > 59) return false;
+  }
+
+  return true;
+}
 
 /**
  * Validates that a backup timestamp is a strictly compliant ISO 8601 string with timezone,
- * not in the future, and within the required 24-hour freshness window.
+ * possesses valid calendar semantics (no normalized impossible dates), is not in the future,
+ * and falls within the required 24-hour freshness window.
  *
  * @param rawTimestamp ISO 8601 timestamp string with timezone (UTC or offset)
  * @param referenceTimeMs Reference timestamp (defaults to Date.now())
@@ -143,18 +186,39 @@ export function validateBackupTimestampFreshness(
   rawTimestamp?: string,
   referenceTimeMs: number = Date.now()
 ): number {
-  if (
-    !rawTimestamp ||
-    typeof rawTimestamp !== 'string' ||
-    !ISO_8601_TIMESTAMP_REGEX.test(rawTimestamp) ||
-    isNaN(Date.parse(rawTimestamp))
-  ) {
+  if (!rawTimestamp || typeof rawTimestamp !== 'string') {
     throw new Error(
       'MIGRATION_BLOCKED: Must provide a valid ISO 8601 timestamp with timezone information for the verified backup (e.g. 2026-11-22T08:00:00.000Z or 2026-11-22T10:00:00.000+02:00).'
     );
   }
 
+  const match = rawTimestamp.match(ISO_8601_TIMESTAMP_REGEX);
+  if (!match) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Must provide a valid ISO 8601 timestamp with timezone information for the verified backup (e.g. 2026-11-22T08:00:00.000Z or 2026-11-22T10:00:00.000+02:00).'
+    );
+  }
+
+  const year = parseInt(match[1], 10);
+  const month = parseInt(match[2], 10);
+  const day = parseInt(match[3], 10);
+  const hour = parseInt(match[4], 10);
+  const minute = parseInt(match[5], 10);
+  const second = parseInt(match[6], 10);
+  const tz = match[8];
+
+  if (!isValidCalendarDateTime(year, month, day, hour, minute, second, tz)) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Must provide a valid ISO 8601 timestamp with calendar-valid date and timezone information (e.g. 2026-11-22T08:00:00.000Z or 2026-11-22T10:00:00.000+02:00).'
+    );
+  }
+
   const parsedBackupTime = Date.parse(rawTimestamp);
+  if (isNaN(parsedBackupTime)) {
+    throw new Error(
+      'MIGRATION_BLOCKED: Must provide a valid ISO 8601 timestamp with timezone information for the verified backup (e.g. 2026-11-22T08:00:00.000Z or 2026-11-22T10:00:00.000+02:00).'
+    );
+  }
 
   // Reject future timestamps
   if (parsedBackupTime > referenceTimeMs) {
@@ -178,26 +242,39 @@ export function validateBackupTimestampFreshness(
  * or trusted runtime environment variables. Caller overrides are explicitly prohibited.
  *
  * Inspects all applicable trusted sources independently:
- * 1. Admin App options attached to the supplied Firestore instance (or default app fallback
- *    when the Firestore instance does not expose its project ID).
+ * 1. Admin App options attached to the supplied Firestore instance:
+ *    - Uses app.options.projectId if present.
+ *    - Fallback: If the Firestore instance has an app object with no options.projectId, looks up
+ *      an initialized Admin App in admin.apps matching app.name exactly. Does NOT infer identity
+ *      from unrelated named Admin Apps.
+ *    - Fallback: If no app is attached to the Firestore instance, checks admin.apps[0] if present.
  * 2. process.env.GCLOUD_PROJECT, when configured.
  * 3. projectId parsed from process.env.FIREBASE_CONFIG, when configured (independent of GCLOUD_PROJECT).
+ *    Configured but whitespace-only FIREBASE_CONFIG fails closed.
  *
  * Requirements:
  * - Compares all available, applicable trusted identity values.
  * - Fails closed with MIGRATION_BLOCKED if any sources conflict.
- * - Fails closed with MIGRATION_BLOCKED if configured FIREBASE_CONFIG is malformed or lacks usable projectId.
+ * - Fails closed with MIGRATION_BLOCKED if configured FIREBASE_CONFIG is malformed, whitespace-only, or lacks usable projectId.
  * - Fails closed if no trusted project identity can be determined.
  * - Never infers identity from targetProjectId.
  */
 export function resolveActiveProjectId(firestore: admin.firestore.Firestore): string {
   const detectedSources: { source: string; projectId: string }[] = [];
 
-  // 1. Primary: initialized Admin App options attached to firestore instance or default app fallback
+  // 1. Primary: initialized Admin App options attached to firestore instance or matching admin.apps fallback
   let appProject: string | undefined;
   const app = (firestore as any)?.app;
   if (app?.options?.projectId && typeof app.options.projectId === 'string' && app.options.projectId.trim().length > 0) {
     appProject = app.options.projectId.trim();
+  } else if (app) {
+    // Firestore exposes an app object but options.projectId is missing/empty.
+    // Safely look up matching Admin App by exact name only.
+    const appName = typeof app.name === 'string' && app.name.trim().length > 0 ? app.name.trim() : '[DEFAULT]';
+    const matchingAdminApp = admin.apps && admin.apps.length > 0 ? admin.apps.find((a) => a && a.name === appName) : undefined;
+    if (matchingAdminApp?.options?.projectId && typeof matchingAdminApp.options.projectId === 'string' && matchingAdminApp.options.projectId.trim().length > 0) {
+      appProject = matchingAdminApp.options.projectId.trim();
+    }
   } else if (!app && admin.apps && admin.apps.length > 0 && admin.app()?.options?.projectId) {
     appProject = admin.app()!.options.projectId!.trim();
   }
@@ -214,9 +291,15 @@ export function resolveActiveProjectId(firestore: admin.firestore.Firestore): st
   }
 
   // 3. Environment: FIREBASE_CONFIG (evaluated independently even when GCLOUD_PROJECT is present)
-  if (process.env.FIREBASE_CONFIG && process.env.FIREBASE_CONFIG.trim().length > 0) {
+  if (process.env.FIREBASE_CONFIG !== undefined) {
+    const trimmedConfig = process.env.FIREBASE_CONFIG.trim();
+    if (trimmedConfig.length === 0) {
+      throw new Error(
+        'MIGRATION_BLOCKED: Configured FIREBASE_CONFIG environment variable is empty or whitespace-only.'
+      );
+    }
     try {
-      const cfg = JSON.parse(process.env.FIREBASE_CONFIG);
+      const cfg = JSON.parse(trimmedConfig);
       if (cfg && typeof cfg.projectId === 'string' && cfg.projectId.trim().length > 0) {
         detectedSources.push({
           source: 'FIREBASE_CONFIG',

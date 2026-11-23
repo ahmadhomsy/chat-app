@@ -2582,4 +2582,50 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     validBatch.delete(doc(aliceDb, 'conversations', 'group_atomic_admin_malformed', 'participants', 'bob'));
     await assertSucceeds(validBatch.commit());
   });
+
+  it('82. Administrator entries beyond index 7: non-string entry at index 8 cannot authenticate or gain administrative authority while adminIds[0] remains protected', async () => {
+    // Seed group with 10 participants and 9 admins (indexes 0-7 string, index 8 numeric 99999)
+    await testEnv.withSecurityRulesDisabled(async (context) => {
+      await setDoc(doc(context.firestore(), 'conversations', 'group_index8_boundary'), {
+        type: 'group',
+        groupName: 'Index 8 Boundary Group',
+        participantIds: ['alice', 'admin1', 'admin2', 'admin3', 'admin4', 'admin5', 'admin6', 'admin7', 99999 as any, 'bob'],
+        adminIds: ['alice', 'admin1', 'admin2', 'admin3', 'admin4', 'admin5', 'admin6', 'admin7', 99999 as any],
+        createdBy: 'alice',
+        createdAt: serverTimestamp(),
+      });
+    });
+
+    const aliceDb = testEnv.authenticatedContext('alice').firestore();
+    const numericUserDb = testEnv.authenticatedContext('99999').firestore();
+
+    // 1. Alice (at adminIds[0]) has full admin authority
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'group_index8_boundary'), {
+        groupName: 'Index 8 Boundary - Managed by Alice',
+      })
+    );
+
+    // 2. User authenticated as string "99999" cannot perform admin operations (type mismatch with numeric 99999)
+    await assertFails(
+      updateDoc(doc(numericUserDb, 'conversations', 'group_index8_boundary'), {
+        groupName: 'Unauthorized Update by 99999',
+      })
+    );
+
+    // 3. Alice cannot abandon the group leaving only non-string entry at index 0
+    await assertFails(
+      updateDoc(doc(aliceDb, 'conversations', 'group_index8_boundary'), {
+        participantIds: ['bob', 99999 as any],
+        adminIds: [99999 as any],
+      })
+    );
+
+    // 4. Legitimate succession to admin1 succeeds
+    await assertSucceeds(
+      updateDoc(doc(aliceDb, 'conversations', 'group_index8_boundary'), {
+        adminIds: ['admin1'],
+      })
+    );
+  });
 });
