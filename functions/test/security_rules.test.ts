@@ -2583,14 +2583,37 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     await assertSucceeds(validBatch.commit());
   });
 
-  it('82. Administrator entries beyond index 7: non-string entry at index 8 cannot authenticate or gain administrative authority while adminIds[0] remains protected', async () => {
-    // Seed group with 10 participants and 9 admins (indexes 0-7 string, index 8 numeric 99999)
+  it('82. Administrator entries beyond index 7: valid membership for user "99999" does not grant administrative authority when matching admin entry is numeric, while adminIds[0] remains protected', async () => {
+    // Seed group with 11 participants and 9 admins:
+    // String '99999' is a member in participantIds; numeric 99999 is present at index 8 in both participantIds and adminIds
     await testEnv.withSecurityRulesDisabled(async (context) => {
       await setDoc(doc(context.firestore(), 'conversations', 'group_index8_boundary'), {
         type: 'group',
         groupName: 'Index 8 Boundary Group',
-        participantIds: ['alice', 'admin1', 'admin2', 'admin3', 'admin4', 'admin5', 'admin6', 'admin7', 99999 as any, 'bob'],
-        adminIds: ['alice', 'admin1', 'admin2', 'admin3', 'admin4', 'admin5', 'admin6', 'admin7', 99999 as any],
+        participantIds: [
+          'alice',
+          'admin1',
+          'admin2',
+          'admin3',
+          'admin4',
+          'admin5',
+          'admin6',
+          'admin7',
+          99999 as any,
+          '99999',
+          'bob',
+        ],
+        adminIds: [
+          'alice',
+          'admin1',
+          'admin2',
+          'admin3',
+          'admin4',
+          'admin5',
+          'admin6',
+          'admin7',
+          99999 as any,
+        ],
         createdBy: 'alice',
         createdAt: serverTimestamp(),
       });
@@ -2599,21 +2622,27 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
     const aliceDb = testEnv.authenticatedContext('alice').firestore();
     const numericUserDb = testEnv.authenticatedContext('99999').firestore();
 
-    // 1. Alice (at adminIds[0]) has full admin authority
+    // 1. Alice, the valid administrator at index 0, can update permitted group metadata
     await assertSucceeds(
       updateDoc(doc(aliceDb, 'conversations', 'group_index8_boundary'), {
         groupName: 'Index 8 Boundary - Managed by Alice',
       })
     );
 
-    // 2. User authenticated as string "99999" cannot perform admin operations (type mismatch with numeric 99999)
+    // 2. The authenticated user with UID "99999" can read the group because the string UID exists in participantIds
+    await assertSucceeds(
+      getDoc(doc(numericUserDb, 'conversations', 'group_index8_boundary'))
+    );
+
+    // 3 & 4. The same user cannot perform a group-administrator operation because the matching entry in adminIds
+    // is numeric (99999) rather than a string ("99999"). The numeric value at index 8 does not grant administrative authority.
     await assertFails(
       updateDoc(doc(numericUserDb, 'conversations', 'group_index8_boundary'), {
         groupName: 'Unauthorized Update by 99999',
       })
     );
 
-    // 3. Alice cannot abandon the group leaving only non-string entry at index 0
+    // 5. Alice cannot abandon the group leaving only an invalid non-string administrator at index 0
     await assertFails(
       updateDoc(doc(aliceDb, 'conversations', 'group_index8_boundary'), {
         participantIds: ['bob', 99999 as any],
@@ -2621,7 +2650,7 @@ describe('Firebase Security Rules Independent Verification Tests', () => {
       })
     );
 
-    // 4. Legitimate succession to admin1 succeeds
+    // 6. Valid succession to admin1 continues to succeed
     await assertSucceeds(
       updateDoc(doc(aliceDb, 'conversations', 'group_index8_boundary'), {
         adminIds: ['admin1'],

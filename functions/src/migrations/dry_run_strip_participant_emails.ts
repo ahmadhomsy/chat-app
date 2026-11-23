@@ -247,6 +247,9 @@ export function validateBackupTimestampFreshness(
  *    - Fallback: If the Firestore instance has an app object with no options.projectId, looks up
  *      an initialized Admin App in admin.apps matching app.name exactly. Does NOT infer identity
  *      from unrelated named Admin Apps.
+ *    - Fail-Closed: If the Firestore instance has an app object that cannot be identified via its
+ *      options or a matching initialized Admin App, throws MIGRATION_BLOCKED immediately. It never
+ *      falls back to environment project IDs for an unidentified Firestore app.
  *    - Fallback: If no app is attached to the Firestore instance, checks admin.apps[0] if present.
  * 2. process.env.GCLOUD_PROJECT, when configured.
  * 3. projectId parsed from process.env.FIREBASE_CONFIG, when configured (independent of GCLOUD_PROJECT).
@@ -256,6 +259,7 @@ export function validateBackupTimestampFreshness(
  * - Compares all available, applicable trusted identity values.
  * - Fails closed with MIGRATION_BLOCKED if any sources conflict.
  * - Fails closed with MIGRATION_BLOCKED if configured FIREBASE_CONFIG is malformed, whitespace-only, or lacks usable projectId.
+ * - Fails closed with MIGRATION_BLOCKED if an attached Firestore app cannot be verified.
  * - Fails closed if no trusted project identity can be determined.
  * - Never infers identity from targetProjectId.
  */
@@ -265,19 +269,29 @@ export function resolveActiveProjectId(firestore: admin.firestore.Firestore): st
   // 1. Primary: initialized Admin App options attached to firestore instance or matching admin.apps fallback
   let appProject: string | undefined;
   const app = (firestore as any)?.app;
-  if (app?.options?.projectId && typeof app.options.projectId === 'string' && app.options.projectId.trim().length > 0) {
-    appProject = app.options.projectId.trim();
-  } else if (app) {
-    // Firestore exposes an app object but options.projectId is missing/empty.
-    // Safely look up matching Admin App by exact name only.
-    const appName = typeof app.name === 'string' && app.name.trim().length > 0 ? app.name.trim() : '[DEFAULT]';
-    const matchingAdminApp = admin.apps && admin.apps.length > 0 ? admin.apps.find((a) => a && a.name === appName) : undefined;
-    if (matchingAdminApp?.options?.projectId && typeof matchingAdminApp.options.projectId === 'string' && matchingAdminApp.options.projectId.trim().length > 0) {
-      appProject = matchingAdminApp.options.projectId.trim();
+  if (app) {
+    // Firestore exposes an app object: identity MUST be established via its options or an exact-name matching Admin App.
+    if (app.options?.projectId && typeof app.options.projectId === 'string' && app.options.projectId.trim().length > 0) {
+      appProject = app.options.projectId.trim();
+    } else {
+      const appName = typeof app.name === 'string' && app.name.trim().length > 0 ? app.name.trim() : '[DEFAULT]';
+      const matchingAdminApp = admin.apps && admin.apps.length > 0 ? admin.apps.find((a) => a && a.name === appName) : undefined;
+      if (matchingAdminApp?.options?.projectId && typeof matchingAdminApp.options.projectId === 'string' && matchingAdminApp.options.projectId.trim().length > 0) {
+        appProject = matchingAdminApp.options.projectId.trim();
+      }
     }
-  } else if (!app && admin.apps && admin.apps.length > 0 && admin.app()?.options?.projectId) {
+
+    if (!appProject) {
+      const displayAppName = typeof app.name === 'string' && app.name.trim().length > 0 ? app.name.trim() : '[unknown]';
+      throw new Error(
+        `MIGRATION_BLOCKED: Unable to verify project identity for the app attached to the supplied Firestore instance (app name: "${displayAppName}").`
+      );
+    }
+  } else if (admin.apps && admin.apps.length > 0 && admin.app()?.options?.projectId) {
+    // No app attached to Firestore instance (e.g. lightweight client or mock): check default initialized Admin App
     appProject = admin.app()!.options.projectId!.trim();
   }
+
   if (appProject) {
     detectedSources.push({ source: 'Firebase Admin App', projectId: appProject });
   }

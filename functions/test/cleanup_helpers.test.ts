@@ -555,8 +555,56 @@ describe('Account Cleanup Production Helpers & Reliability Tests', () => {
         const firestoreWithUnrelatedApp: any = { app: { name: 'otherApp', options: {} } };
         assert.throws(
           () => resolveActiveProjectId(firestoreWithUnrelatedApp),
-          /Unable to determine active Firebase project identity/
+          /Unable to verify project identity for the app attached to the supplied Firestore instance/
         );
+
+        // Mandatory Regression (Phase 4.3.4.2): Unknown Firestore app with matching environment variables must FAIL CLOSED
+        const firestoreWithUnknownApp: any = {
+          app: {
+            name: 'unknownApp',
+            options: {},
+          },
+        };
+        process.env.GCLOUD_PROJECT = 'staging-project';
+        process.env.FIREBASE_CONFIG = JSON.stringify({ projectId: 'staging-project' });
+
+        assert.throws(
+          () => resolveActiveProjectId(firestoreWithUnknownApp),
+          /Unable to verify project identity for the app attached to the supplied Firestore instance/
+        );
+
+        // Verification in execution path: performs zero Firestore queries and zero writes
+        let unknownAppQueryCount = 0;
+        const firestoreUnknownQueryTrack: any = {
+          app: {
+            name: 'unknownApp',
+            options: {},
+          },
+          collection: () => {
+            unknownAppQueryCount++;
+            return {
+              orderBy: () => ({
+                limit: () => ({
+                  get: async () => ({ empty: true, docs: [], size: 0 }),
+                }),
+              }),
+            };
+          },
+        };
+
+        await assert.rejects(
+          async () => {
+            await executeParticipantEmailSanitization(firestoreUnknownQueryTrack, {
+              authorizationToken: 'CORRECT_TOKEN_123',
+              backupId: 'gs://staging-backups/2026-11-22',
+              backupTimestamp: freshBackupTimestamp,
+              operatorBackupAttestation: true,
+              targetProjectId: 'staging-project',
+            });
+          },
+          /Unable to verify project identity for the app attached to the supplied Firestore instance/
+        );
+        assert.strictEqual(unknownAppQueryCount, 0, 'No query or mutation may execute when Firestore app is unidentified');
       } finally {
         await namedApp.delete();
       }

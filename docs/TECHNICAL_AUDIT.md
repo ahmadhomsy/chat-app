@@ -1,4 +1,4 @@
-# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1, Phase 4.2, Phase 4.3, Phase 4.3.1, Phase 4.3.2, Phase 4.3.3, Phase 4.3.4 & Phase 4.3.4.1)
+# ChatUp: Technical Audit, Architecture, and Engineering Remediation Report (Phase 4, Phase 4.1, Phase 4.2, Phase 4.3, Phase 4.3.1, Phase 4.3.2, Phase 4.3.3, Phase 4.3.4, Phase 4.3.4.1 & Phase 4.3.4.2)
 
 ## 1. Executive Summary & Verification Matrix
 
@@ -37,6 +37,8 @@ Every capability is categorized across four explicit stages:
 | **Strict ISO 8601 Backup Timestamp Validation (Phase 4.3.4)** | ✅ Yes (`validateBackupTimestampFreshness`) | ✅ Yes (Unit Test 11: 8) | ✅ Verified (Rejects non-ISO JS dates; enforces timezone) | ⏳ Awaiting Ops Auth |
 | **Strict Calendar Semantics Validation (Phase 4.3.4.1)** | ✅ Yes (`isValidCalendarDateTime`) | ✅ Yes (Unit Test 11: 8) | ✅ Verified (Rejects impossible/normalized dates like Feb 31, leap-year aware) | ⏳ Awaiting Ops Auth |
 | **Firebase Identity Resolver Fallback & Whitespace Handling (Phase 4.3.4.1)** | ✅ Yes (`resolveActiveProjectId`) | ✅ Yes (Unit Test 11: 9) | ✅ Verified (Whitespace-only fails closed, exact Admin App matching) | ⏳ Awaiting Ops Auth |
+| **Fail-Closed Firestore App Association (Phase 4.3.4.2)** | ✅ Yes (`resolveActiveProjectId`) | ✅ Yes (Unit Test 11: 9) | ✅ Verified (Unverified Firestore app fails closed; zero queries/writes) | ⏳ Awaiting Ops Auth |
+| **Admin Authorization vs Membership Isolation (Phase 4.3.4.2)** | ✅ Yes (`firestore.rules`) | ✅ Yes (Rules Test 82) | ✅ Verified (String '99999' is member & can read; numeric 99999 admin entry grants zero admin authority) | ⏳ Awaiting Ops Auth |
 | **Clarified Group Admin Scope & Non-String Isolation (Phase 4.3.4.1)** | ✅ Yes (`isValidAdminList`) | ✅ Yes (Rules Test 82) | ✅ Verified (Indexes 0–7 bounded, adminIds[0] protected, non-string unable to auth) | ⏳ Awaiting Ops Auth |
 | **Group Admin Usability & Succession Invariants (Phase 4.3.4)** | ✅ Yes (`firestore.rules` - `isValidAdminList`) | ✅ Yes (Rules Tests 75–81) | ✅ Verified (Bounded string UIDs, last-admin protection, clean succession) | ⏳ Awaiting Ops Auth |
 | **UID Type & Length Bounds Audit (Phase 4.3.3 & Phase 4.3.4)** | ✅ Yes (`firestore.rules`) | ✅ Yes (Rules Tests 72–81) | ✅ Verified (Direct & Subcollection complete, Group Admin bounded) | ⏳ Awaiting Ops Auth |
@@ -151,10 +153,26 @@ firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
     ✔ 79. Legitimate group administrator succession succeeds when the new administrator is a valid participant (69ms)
     ✔ 80. The last usable administrator cannot leave the group without appointing a valid successor (42ms)
     ✔ 81. Atomic participant removal cannot leave the parent conversation in a malformed or administrator-less state (53ms)
-    ✔ 82. Administrator entries beyond index 7: non-string entry at index 8 cannot authenticate or gain administrative authority while adminIds[0] remains protected (68ms)
+    ✔ 82. Administrator entries beyond index 7: valid membership for user "99999" does not grant administrative authority when matching admin entry is numeric, while adminIds[0] remains protected (68ms)
 
   82 passing (36s)
 ```
+
+### Critical Rules Invariants & Architecture Remediated in Phase 4.3.4.2:
+1. **Fail-Closed Firestore App Association (`resolveActiveProjectId`)**:
+   - *Previous Gap*: When a Firestore instance exposed an `app` object without `options.projectId`, if no exact match was found in `admin.apps`, the resolver continued down to inspect `GCLOUD_PROJECT` and `FIREBASE_CONFIG`. If those environment variables matched, an unverified Firestore app could appear verified without proof of project affiliation.
+   - *Remediation*: When a Firestore instance exposes an `app` object, its identity must be proven via either:
+     1. Its own valid `app.options.projectId`, or
+     2. An initialized Admin App with an exact matching `app.name` and a valid `options.projectId`.
+   - If neither source verifies the associated app, `resolveActiveProjectId()` immediately throws `MIGRATION_BLOCKED: Unable to verify project identity for the app attached to the supplied Firestore instance (app name: "...")`. It never falls back to environment project IDs for an unidentified Firestore app.
+   - In the migration execution guard (`executeParticipantEmailSanitization`), this ensures that supplied Firestore instances with unverified apps are halted immediately with zero database reads and zero writes.
+2. **Precise Membership vs Administrator Authorization Isolation (Test 82)**:
+   - *Previous Gap*: Earlier boundary test fixtures placed numeric `99999` in both `participantIds` and `adminIds`, meaning the authenticated user `"99999"` was denied update permissions primarily because they were not a participant.
+   - *Remediation & Proof*: Test 82 uses a refined fixture where string `'99999'` is an active member in `participantIds`, while only the numeric value `99999` is in `adminIds`:
+     * User `"99999"` successfully reads the conversation document (`assertSucceeds(getDoc(...))`).
+     * User `"99999"` is strictly denied group-administrator update operations (`assertFails(updateDoc(...))`) because Firestore Rules type equality differentiates string `"99999"` from numeric `99999`.
+     * Demonstrates conclusively that valid group membership does not imply administrative authority.
+     * Confirms that numeric values beyond index 7 grant zero administrative authority, primary administrator `adminIds[0]` remains protected, and legitimate succession to `admin1` works.
 
 ### Critical Rules Invariants & Boundaries Remediated in Phase 4.3.4.1:
 1. **Strict Calendar Semantics Validation (`isValidCalendarDateTime`)**:
