@@ -64,6 +64,7 @@ void main() {
           currentPlatform: validStagingAndroid,
           android: validStagingAndroid,
           ios: validStagingIos,
+          expectedStorageBucket: 'study-buddy-54266.firebasestorage.app',
         );
 
         expect(DefaultFirebaseOptionsStaging.isConfigured, isTrue);
@@ -94,12 +95,21 @@ void main() {
           appId: '1:639830188590:android:4a3b1c669d60ee593235bf',
           messagingSenderId: '639830188590',
           projectId: 'chat-app-28ac0',
+          storageBucket: 'chat-app-28ac0.firebasestorage.app',
         );
 
-        // Verify Production options are recognized as production
-        expect(invalidProductionAndroid.projectId, 'chat-app-28ac0');
-        expect(invalidProductionAndroid.messagingSenderId, '639830188590');
-        expect(DefaultFirebaseOptions.android.projectId, 'chat-app-28ac0');
+        DefaultFirebaseOptionsStaging.setMockConfiguredOptions(
+          android: invalidProductionAndroid,
+          ios: DefaultFirebaseOptions.ios,
+          expectedStorageBucket: 'study-buddy-54266.firebasestorage.app',
+        );
+
+        // Asserts that candidate injection cannot bypass pure validator
+        expect(DefaultFirebaseOptionsStaging.isConfigured, isFalse);
+        expect(
+          () => DefaultFirebaseOptionsStaging.currentPlatform,
+          throwsA(isA<UnconfiguredStagingEnvironmentException>()),
+        );
       },
     );
 

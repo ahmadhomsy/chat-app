@@ -93,8 +93,8 @@ The Google Services Gradle plugin resolves `google-services.json` per flavor:
 - Environment-specific plist storage:
   - `ios/Runner/Firebase/Production/GoogleService-Info.plist`
   - `ios/Runner/Firebase/Staging/GoogleService-Info.plist`
-- Automated Build Phase Run Script in Xcode (`Runner.xcodeproj/project.pbxproj`):
-  Deterministic POSIX shell script selecting the appropriate flavor plist based on `$FLUTTER_FLAVOR` or `$CONFIGURATION` and failing closed (`exit 1`) if the configuration is unknown or if the requested plist does not exist. Staging never falls back to Production.
+- Automated Build Phase Run Script in Xcode (`Runner.xcodeproj/project.pbxproj` invoking `ios/scripts/select_firebase_plist.sh`):
+  Deterministic POSIX shell script selecting the appropriate flavor plist based on `$FLUTTER_FLAVOR` or `$CONFIGURATION` and failing closed (`exit 1`) if the configuration is unknown, if the flavor is unsupported (e.g. `development`), or if the requested plist does not exist or fails identity validation (verifies `PROJECT_ID`, `GCM_SENDER_ID`, `BUNDLE_ID`, `GOOGLE_APP_ID`, and `STORAGE_BUCKET`). Staging never falls back to Production.
 
 ### Generating Staging Firebase Configuration (Once IAM is Authorized)
 When cloud IAM access to project `study-buddy-54266` is granted:

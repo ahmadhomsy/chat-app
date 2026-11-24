@@ -1,166 +1,250 @@
 #!/bin/sh
 set -e
 
-# POSIX Shell Plist Selector Test Suite
-# Validates portable POSIX shell logic without Bash-specific constructs
+# ChatUp iOS Firebase Plist Selector & Identity Validation Test Suite
+# Tests ios/scripts/select_firebase_plist.sh under standard POSIX /bin/sh.
+# Asserts strict flavor enforcement, Xcode configuration inference, plist identity validation,
+# and zero cross-environment fallback.
 
-TEST_DIR=$(mktemp -d 2>/dev/null || mktemp -d -t 'plist_test')
-trap 'rm -rf "$TEST_DIR"' EXIT
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+SELECTOR_SCRIPT="$REPO_ROOT/ios/scripts/select_firebase_plist.sh"
 
-PROJECT_DIR="$TEST_DIR"
-BUILT_PRODUCTS_DIR="$TEST_DIR/build"
+if [ ! -f "$SELECTOR_SCRIPT" ]; then
+    echo "ERROR: Selector script not found at $SELECTOR_SCRIPT" >&2
+    exit 1
+fi
+
+TEST_TMP=$(mktemp -d 2>/dev/null || mktemp -d -t 'plist_test')
+trap 'rm -rf "$TEST_TMP"' EXIT
+
+PROJECT_DIR="$TEST_TMP/ios"
+BUILT_PRODUCTS_DIR="$TEST_TMP/build"
 PRODUCT_NAME="Runner"
 mkdir -p "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app"
 mkdir -p "$PROJECT_DIR/Runner/Firebase/Production"
 mkdir -p "$PROJECT_DIR/Runner/Firebase/Staging"
 
-echo "MOCK_PRODUCTION_PLIST" > "$PROJECT_DIR/Runner/Firebase/Production/GoogleService-Info.plist"
-echo "MOCK_STAGING_PLIST" > "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist"
+# Helpers to write valid mock plist fixtures (without real credentials)
+write_staging_plist() {
+    _path="$1"
+    _proj_id="${2:-study-buddy-54266}"
+    _sender_id="${3:-194789753908}"
+    _bundle_id="${4:-com.example.chatApp.staging}"
+    _app_id="${5:-1:194789753908:ios:mockstagingappid123}"
+    _bucket="${6:-study-buddy-54266.firebasestorage.app}"
+    _api_key="${7:-AIzaSy_MOCK_STAGING_API_KEY_VALID_123}"
 
-run_selector() {
-    FLUTTER_FLAVOR="$1"
-    CONFIGURATION="$2"
-    
-    PLIST_DEST="${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/GoogleService-Info.plist"
-    rm -f "$PLIST_DEST"
-
-    TARGET_ENV=""
-
-    if [ "$FLUTTER_FLAVOR" = "staging" ]; then
-        TARGET_ENV="staging"
-    elif [ "$FLUTTER_FLAVOR" = "production" ]; then
-        TARGET_ENV="production"
-    else
-        case "$CONFIGURATION" in
-            *staging*|*Staging*)
-                TARGET_ENV="staging"
-                ;;
-            Debug|Profile|Release|*production*|*Production*)
-                TARGET_ENV="production"
-                ;;
-            *)
-                echo "error: Unrecognized build configuration '$CONFIGURATION' or flavor '$FLUTTER_FLAVOR'." >&2
-                return 1
-                ;;
-        esac
-    fi
-
-    PLIST_SRC=""
-
-    case "$TARGET_ENV" in
-        staging)
-            if [ -f "${PROJECT_DIR}/Runner/Firebase/Staging/GoogleService-Info.plist" ]; then
-                PLIST_SRC="${PROJECT_DIR}/Runner/Firebase/Staging/GoogleService-Info.plist"
-            elif [ -f "${PROJECT_DIR}/Firebase/GoogleService-Info-staging.plist" ]; then
-                PLIST_SRC="${PROJECT_DIR}/Firebase/GoogleService-Info-staging.plist"
-            fi
-
-            if [ -z "$PLIST_SRC" ]; then
-                echo "error: Staging GoogleService-Info.plist not found!" >&2
-                return 1
-            fi
-            ;;
-        production)
-            if [ -f "${PROJECT_DIR}/Runner/Firebase/Production/GoogleService-Info.plist" ]; then
-                PLIST_SRC="${PROJECT_DIR}/Runner/Firebase/Production/GoogleService-Info.plist"
-            elif [ -f "${PROJECT_DIR}/Firebase/GoogleService-Info-production.plist" ]; then
-                PLIST_SRC="${PROJECT_DIR}/Firebase/GoogleService-Info-production.plist"
-            elif [ -f "${PROJECT_DIR}/Runner/GoogleService-Info.plist" ]; then
-                PLIST_SRC="${PROJECT_DIR}/Runner/GoogleService-Info.plist"
-            fi
-
-            if [ -z "$PLIST_SRC" ]; then
-                echo "error: Production GoogleService-Info.plist not found!" >&2
-                return 1
-            fi
-            ;;
-        *)
-            echo "error: Invalid target environment '$TARGET_ENV'" >&2
-            return 1
-            ;;
-    esac
-
-    cp -f "$PLIST_SRC" "$PLIST_DEST"
-    return 0
+    cat <<EOF > "$_path"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PROJECT_ID</key>
+	<string>$_proj_id</string>
+	<key>GCM_SENDER_ID</key>
+	<string>$_sender_id</string>
+	<key>BUNDLE_ID</key>
+	<string>$_bundle_id</string>
+	<key>GOOGLE_APP_ID</key>
+	<string>$_app_id</string>
+	<key>STORAGE_BUCKET</key>
+	<string>$_bucket</string>
+	<key>API_KEY</key>
+	<string>$_api_key</string>
+</dict>
+</plist>
+EOF
 }
 
-echo "Running Plist Selector Portability Tests..."
+write_production_plist() {
+    _path="$1"
+    _proj_id="${2:-chat-app-28ac0}"
+    _sender_id="${3:-639830188590}"
+    _bundle_id="${4:-com.example.chatApp}"
+    _app_id="${5:-1:639830188590:ios:mockproductionappid123}"
+    _bucket="${6:-chat-app-28ac0.firebasestorage.app}"
+    _api_key="${7:-AIzaSy_MOCK_PRODUCTION_API_KEY_VALID_456}"
 
-# Test 1: Staging configuration selects staging plist
-run_selector "" "Debug-staging"
-CONTENT=$(cat "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist")
-if [ "$CONTENT" != "MOCK_STAGING_PLIST" ]; then
-    echo "FAIL: Test 1 expected MOCK_STAGING_PLIST, got $CONTENT"
+    cat <<EOF > "$_path"
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PROJECT_ID</key>
+	<string>$_proj_id</string>
+	<key>GCM_SENDER_ID</key>
+	<string>$_sender_id</string>
+	<key>BUNDLE_ID</key>
+	<string>$_bundle_id</string>
+	<key>GOOGLE_APP_ID</key>
+	<string>$_app_id</string>
+	<key>STORAGE_BUCKET</key>
+	<string>$_bucket</string>
+	<key>API_KEY</key>
+	<string>$_api_key</string>
+</dict>
+</plist>
+EOF
+}
+
+setup_standard_fixtures() {
+    write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist"
+    write_production_plist "$PROJECT_DIR/Runner/Firebase/Production/GoogleService-Info.plist"
+}
+
+run_test_selector() {
+    _flavor="$1"
+    _config="$2"
+    _dest="$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist"
+    rm -f "$_dest"
+
+    env FLUTTER_FLAVOR="$_flavor" \
+        CONFIGURATION="$_config" \
+        PROJECT_DIR="$PROJECT_DIR" \
+        BUILT_PRODUCTS_DIR="$BUILT_PRODUCTS_DIR" \
+        PRODUCT_NAME="$PRODUCT_NAME" \
+        PLIST_DEST="$_dest" \
+        sh "$SELECTOR_SCRIPT"
+}
+
+assert_destination_contains() {
+    _needle="$1"
+    _dest="$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist"
+    if [ ! -f "$_dest" ]; then
+        echo "FAIL: Destination plist was not created at $_dest" >&2
+        exit 1
+    fi
+    if ! grep -q "$_needle" "$_dest"; then
+        echo "FAIL: Expected '$_needle' in destination plist, but content was:" >&2
+        cat "$_dest" >&2
+        exit 1
+    fi
+}
+
+echo "Running Plist Selector & Identity Validation Tests..."
+setup_standard_fixtures
+
+# 1. Debug-staging selects Staging
+run_test_selector "" "Debug-staging"
+assert_destination_contains "study-buddy-54266"
+echo "  [PASS] 1. Debug-staging selects Staging"
+
+# 2. Profile-staging selects Staging
+run_test_selector "" "Profile-staging"
+assert_destination_contains "study-buddy-54266"
+echo "  [PASS] 2. Profile-staging selects Staging"
+
+# 3. Release-staging selects Staging
+run_test_selector "" "Release-staging"
+assert_destination_contains "study-buddy-54266"
+echo "  [PASS] 3. Release-staging selects Staging"
+
+# 4. Debug selects Production
+run_test_selector "" "Debug"
+assert_destination_contains "chat-app-28ac0"
+echo "  [PASS] 4. Debug selects Production"
+
+# 5. Profile selects Production
+run_test_selector "" "Profile"
+assert_destination_contains "chat-app-28ac0"
+echo "  [PASS] 5. Profile selects Production"
+
+# 6. Release selects Production
+run_test_selector "" "Release"
+assert_destination_contains "chat-app-28ac0"
+echo "  [PASS] 6. Release selects Production"
+
+# 7. FLUTTER_FLAVOR=staging selects Staging
+run_test_selector "staging" ""
+assert_destination_contains "study-buddy-54266"
+echo "  [PASS] 7. FLUTTER_FLAVOR=staging selects Staging"
+
+# 8. FLUTTER_FLAVOR=production selects Production
+run_test_selector "production" ""
+assert_destination_contains "chat-app-28ac0"
+echo "  [PASS] 8. FLUTTER_FLAVOR=production selects Production"
+
+# 9. FLUTTER_FLAVOR=development with Debug fails closed immediately
+if run_test_selector "development" "Debug" 2>/dev/null; then
+    echo "FAIL: Test 9 expected error when FLUTTER_FLAVOR=development with CONFIGURATION=Debug" >&2
     exit 1
 fi
-echo "  [PASS] 1. Debug-staging selects Staging plist"
+echo "  [PASS] 9. FLUTTER_FLAVOR=development with Debug fails closed"
 
-# Test 2: Release-staging selects staging plist
-run_selector "" "Release-staging"
-CONTENT=$(cat "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist")
-if [ "$CONTENT" != "MOCK_STAGING_PLIST" ]; then
-    echo "FAIL: Test 2 expected MOCK_STAGING_PLIST, got $CONTENT"
+# 10. Unknown non-empty flavor fails closed
+if run_test_selector "custom_flavor" "Release" 2>/dev/null; then
+    echo "FAIL: Test 10 expected error on unknown flavor" >&2
     exit 1
 fi
-echo "  [PASS] 2. Release-staging selects Staging plist"
+echo "  [PASS] 10. Unknown non-empty flavor fails closed"
 
-# Test 3: FLUTTER_FLAVOR=staging selects staging plist
-run_selector "staging" ""
-CONTENT=$(cat "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist")
-if [ "$CONTENT" != "MOCK_STAGING_PLIST" ]; then
-    echo "FAIL: Test 3 expected MOCK_STAGING_PLIST, got $CONTENT"
+# 11. Unknown Configuration fails closed
+if run_test_selector "" "UnknownConfiguration" 2>/dev/null; then
+    echo "FAIL: Test 11 expected error on UnknownConfiguration" >&2
     exit 1
 fi
-echo "  [PASS] 3. FLUTTER_FLAVOR=staging selects Staging plist"
+echo "  [PASS] 11. Unknown Configuration fails closed"
 
-# Test 4: Debug configuration selects production plist
-run_selector "" "Debug"
-CONTENT=$(cat "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist")
-if [ "$CONTENT" != "MOCK_PRODUCTION_PLIST" ]; then
-    echo "FAIL: Test 4 expected MOCK_PRODUCTION_PLIST, got $CONTENT"
-    exit 1
-fi
-echo "  [PASS] 4. Debug selects Production plist"
-
-# Test 5: Release configuration selects production plist
-run_selector "" "Release"
-CONTENT=$(cat "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist")
-if [ "$CONTENT" != "MOCK_PRODUCTION_PLIST" ]; then
-    echo "FAIL: Test 5 expected MOCK_PRODUCTION_PLIST, got $CONTENT"
-    exit 1
-fi
-echo "  [PASS] 5. Release selects Production plist"
-
-# Test 6: Unknown configuration terminates with exit 1
-if run_selector "" "UnknownConfiguration" 2>/dev/null; then
-    echo "FAIL: Test 6 expected error on UnknownConfiguration"
-    exit 1
-fi
-echo "  [PASS] 6. Unknown configuration terminates with error"
-
-# Test 7: Missing Staging plist terminates with exit 1 and never falls back to Production
+# 12. Missing Staging plist fails without Production fallback
 rm -f "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist"
-if run_selector "" "Debug-staging" 2>/dev/null; then
-    echo "FAIL: Test 7 expected error on missing Staging plist"
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 12 expected error on missing Staging plist" >&2
     exit 1
 fi
 if [ -f "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist" ]; then
-    echo "FAIL: Test 7 Staging fell back to Production plist!"
+    echo "FAIL: Test 12 Staging fell back to Production plist!" >&2
     exit 1
 fi
-echo "  [PASS] 7. Missing Staging plist terminates and never falls back to Production"
+echo "  [PASS] 12. Missing Staging plist fails without Production fallback"
 
-# Test 8: Missing Production plist terminates with exit 1 and never falls back to Staging
-echo "MOCK_STAGING_PLIST" > "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist"
+# 13. Missing Production plist fails without Staging fallback
+setup_standard_fixtures
 rm -f "$PROJECT_DIR/Runner/Firebase/Production/GoogleService-Info.plist"
-if run_selector "" "Release" 2>/dev/null; then
-    echo "FAIL: Test 8 expected error on missing Production plist"
+if run_test_selector "" "Release" 2>/dev/null; then
+    echo "FAIL: Test 13 expected error on missing Production plist" >&2
     exit 1
 fi
 if [ -f "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist" ]; then
-    echo "FAIL: Test 8 Production fell back to Staging plist!"
+    echo "FAIL: Test 13 Production fell back to Staging plist!" >&2
     exit 1
 fi
-echo "  [PASS] 8. Missing Production plist terminates and never falls back to Staging"
+echo "  [PASS] 13. Missing Production plist fails without Staging fallback"
 
-echo "All 8 Plist Selector Portability Tests PASSED!"
+# 14. Plist with mismatched Project ID fails validation
+setup_standard_fixtures
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "wrong-project-id"
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 14 expected error on mismatched Staging Project ID" >&2
+    exit 1
+fi
+echo "  [PASS] 14. Plist with mismatched Project ID fails validation"
+
+# 15. Plist with mismatched Bundle ID fails validation
+setup_standard_fixtures
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.wrongBundle"
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 15 expected error on mismatched Staging Bundle ID" >&2
+    exit 1
+fi
+echo "  [PASS] 15. Plist with mismatched Bundle ID fails validation"
+
+# 16. Plist with placeholder API key fails validation
+setup_standard_fixtures
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.chatApp.staging" "1:194789753908:ios:app123" "study-buddy-54266.firebasestorage.app" "STAGING_IOS_API_KEY_PLACEHOLDER"
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 16 expected error on placeholder API key" >&2
+    exit 1
+fi
+echo "  [PASS] 16. Plist with placeholder API key fails validation"
+
+# 17. Plist with Production storage bucket in Staging fails validation
+setup_standard_fixtures
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.chatApp.staging" "1:194789753908:ios:app123" "chat-app-28ac0.firebasestorage.app" "valid-key-123"
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 17 expected error on Production storage bucket in Staging plist" >&2
+    exit 1
+fi
+echo "  [PASS] 17. Plist with Production storage bucket in Staging fails validation"
+
+echo "All 17 Plist Selector & Identity Validation Tests PASSED!"

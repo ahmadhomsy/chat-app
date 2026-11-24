@@ -45,13 +45,15 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
     assert.strictEqual(result.projectId, 'study-buddy-54266');
     assert.strictEqual(result.projectNumber, '194789753908');
     assert.strictEqual(result.appId, '1:194789753908:android:a1b2c3d4e5f6');
+    assert.strictEqual(result.storageBucket, 'study-buddy-54266.firebasestorage.app');
   });
 
   it('2. Production google-services.json is rejected', () => {
     const prodConfig = {
       project_info: {
         project_number: '639830188590',
-        project_id: 'chat-app-28ac0'
+        project_id: 'chat-app-28ac0',
+        storage_bucket: 'chat-app-28ac0.firebasestorage.app'
       },
       client: [
         {
@@ -117,6 +119,47 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
     );
   });
 
+  it('8. Missing or empty storage_bucket is rejected', () => {
+    const emptyBucketConfig = JSON.parse(JSON.stringify(validStagingConfig));
+    delete emptyBucketConfig.project_info.storage_bucket;
+    const fixturePath1 = writeFixture('empty-bucket.json', emptyBucketConfig);
+    assert.throws(
+      () => validateGoogleServices(fixturePath1),
+      /Missing or empty storage_bucket/
+    );
+
+    emptyBucketConfig.project_info.storage_bucket = '   ';
+    const fixturePath2 = writeFixture('whitespace-bucket.json', emptyBucketConfig);
+    assert.throws(
+      () => validateGoogleServices(fixturePath2),
+      /Missing or empty storage_bucket/
+    );
+  });
+
+  it('9. Production storage_bucket in Staging config is rejected', () => {
+    const prodBucketConfig = JSON.parse(JSON.stringify(validStagingConfig));
+    prodBucketConfig.project_info.storage_bucket = 'chat-app-28ac0.firebasestorage.app';
+    const fixturePath = writeFixture('prod-bucket.json', prodBucketConfig);
+    assert.throws(
+      () => validateGoogleServices(fixturePath),
+      /Production storage bucket detected/
+    );
+  });
+
+  it('10. Mismatched expected storage_bucket is rejected', () => {
+    const fixturePath = writeFixture('valid-staging.json', validStagingConfig);
+    assert.throws(
+      () => validateGoogleServices(fixturePath, 'expected-different-bucket.appspot.com'),
+      /does not match authoritative expected bucket/
+    );
+  });
+
+  it('11. Matching expected storage_bucket succeeds', () => {
+    const fixturePath = writeFixture('valid-staging.json', validStagingConfig);
+    const res = validateGoogleServices(fixturePath, 'study-buddy-54266.firebasestorage.app');
+    assert.strictEqual(res.storageBucket, 'study-buddy-54266.firebasestorage.app');
+  });
+
   describe('Fastlane App ID Guard Simulation Tests', () => {
     function simulateFastlaneGuard(stagingAppId, googleServicesPath) {
       if (!stagingAppId || stagingAppId.trim() === '') {
@@ -141,7 +184,7 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
       return true;
     }
 
-    it('8. Fastlane accepts matching Android App ID with google-services.json', () => {
+    it('12. Fastlane accepts matching Android App ID with google-services.json', () => {
       const gsPath = writeFixture('valid-gs.json', validStagingConfig);
       assert.strictEqual(
         simulateFastlaneGuard('1:194789753908:android:a1b2c3d4e5f6', gsPath),
@@ -149,7 +192,7 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
       );
     });
 
-    it('9. Fastlane rejects iOS App ID for Android distribution', () => {
+    it('13. Fastlane rejects iOS App ID for Android distribution', () => {
       const gsPath = writeFixture('valid-gs.json', validStagingConfig);
       assert.throws(
         () => simulateFastlaneGuard('1:194789753908:ios:f6e5d4c3b2a1', gsPath),
@@ -157,7 +200,7 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
       );
     });
 
-    it('10. Fastlane rejects mismatched App ID between ENV and google-services.json', () => {
+    it('14. Fastlane rejects mismatched App ID between ENV and google-services.json', () => {
       const gsPath = writeFixture('valid-gs.json', validStagingConfig);
       assert.throws(
         () => simulateFastlaneGuard('1:194789753908:android:different_app_id_999', gsPath),
@@ -165,7 +208,7 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
       );
     });
 
-    it('11. Fastlane fails if Staging google-services.json is missing', () => {
+    it('15. Fastlane fails if Staging google-services.json is missing', () => {
       assert.throws(
         () => simulateFastlaneGuard('1:194789753908:android:a1b2c3d4e5f6', '/nonexistent/path/google-services.json'),
         /not found at/

@@ -1,3 +1,4 @@
+import 'package:chat_app/firebase_options_staging.dart';
 import 'package:chat_app/firebase_options_staging.generated.dart' as generated;
 import 'package:flutter_test/flutter_test.dart';
 
@@ -57,19 +58,70 @@ void main() {
         reason: 'ios.iosBundleId must be com.example.chatApp.staging',
       );
 
-      // 6. Absolute Production Isolation Check: verify no production project ID or App ID references exist
+      // 6. Storage Bucket Identity Checks
+      expect(
+        android.storageBucket,
+        isNotNull,
+        reason: 'android.storageBucket cannot be null',
+      );
+      expect(
+        android.storageBucket!.isNotEmpty,
+        isTrue,
+        reason: 'android.storageBucket cannot be empty',
+      );
+      expect(
+        ios.storageBucket,
+        isNotNull,
+        reason: 'ios.storageBucket cannot be null',
+      );
+      expect(
+        ios.storageBucket!.isNotEmpty,
+        isTrue,
+        reason: 'ios.storageBucket cannot be empty',
+      );
+      expect(
+        android.storageBucket,
+        equals(ios.storageBucket),
+        reason: 'Android and iOS storage buckets must match each other',
+      );
+
+      // 7. Absolute Production Isolation Check: verify no production credentials exist
       expect(android.projectId, isNot(equals('chat-app-28ac0')));
       expect(ios.projectId, isNot(equals('chat-app-28ac0')));
       expect(android.messagingSenderId, isNot(equals('639830188590')));
       expect(ios.messagingSenderId, isNot(equals('639830188590')));
       expect(android.appId, isNot(contains('639830188590')));
       expect(ios.appId, isNot(contains('639830188590')));
+      expect(
+        android.storageBucket,
+        isNot(equals('chat-app-28ac0.firebasestorage.app')),
+      );
+      expect(
+        android.storageBucket,
+        isNot(equals('chat-app-28ac0.appspot.com')),
+      );
+      expect(
+        ios.storageBucket,
+        isNot(equals('chat-app-28ac0.firebasestorage.app')),
+      );
+      expect(
+        ios.storageBucket,
+        isNot(equals('chat-app-28ac0.appspot.com')),
+      );
 
-      // 7. Non-empty, non-placeholder API keys
+      // 8. Non-empty, non-placeholder API keys
       expect(android.apiKey.isNotEmpty, isTrue);
       expect(android.apiKey, isNot(contains('PLACEHOLDER')));
       expect(ios.apiKey.isNotEmpty, isTrue);
       expect(ios.apiKey, isNot(contains('PLACEHOLDER')));
+
+      // 9. Pure validateStagingOptions must validate options cleanly
+      final valRes = validateStagingOptions(
+        android: android,
+        ios: ios,
+        expectedStorageBucket: android.storageBucket,
+      );
+      expect(valRes.isValid, isTrue, reason: valRes.errorMessage);
     },
   );
 }

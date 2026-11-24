@@ -10,6 +10,7 @@
     "deploy": "firebase deploy --only functions",
     "logs": "firebase functions:log",
     "test": "mocha -r ts-node/register 'test/*_helpers.test.ts' --timeout 20000 --exit",
+    "test:staging:contract": "mocha ../test/infrastructure/staging_secret_contract_test.js --exit",
     "test:rules": "mocha -r ts-node/register 'test/security_rules.test.ts' --timeout 20000 --exit",
     "test:emulators": "firebase emulators:exec --project chat-app-28ac0 --only \"firestore,storage,database\" \"npm run test:rules\""
   },
