@@ -38,6 +38,16 @@ android {
             )
         }
 
+        create("staging") {
+            dimension = "default"
+            applicationIdSuffix = ".staging"
+            resValue(
+                type = "string",
+                name = "app_name",
+                value = "ChatApp_Staging"
+            )
+        }
+
         create("development") {
             dimension = "default"
             applicationIdSuffix = ".dev"

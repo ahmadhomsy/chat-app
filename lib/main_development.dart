@@ -7,7 +7,7 @@ import 'package:flutter/material.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  await Bootstrap.init();
+  await Bootstrap.init(useEmulators: true);
   Bloc.observer = sl<MyBlocObserver>();
   runApp(const MyApp());
 }

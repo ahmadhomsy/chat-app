@@ -149,6 +149,7 @@
 				97C146EA1CF9000F007C117D /* Sources */,
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
+				FF000001294A63A400263BE5 /* Setup Firebase Environment GoogleService-Info.plist */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 			);
@@ -252,6 +253,21 @@
 			runOnlyForDeploymentPostprocessing = 0;
 			shellPath = /bin/sh;
 			shellScript = "/bin/sh \"$FLUTTER_ROOT/packages/flutter_tools/bin/xcode_backend.sh\" build";
+		};
+		FF000001294A63A400263BE5 /* Setup Firebase Environment GoogleService-Info.plist */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputPaths = (
+			);
+			name = "Setup Firebase Environment GoogleService-Info.plist";
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# Select GoogleService-Info.plist based on Flutter flavor or Build Configuration\nPLIST_DEST=\"${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/GoogleService-Info.plist\"\n\nif [ \"$FLUTTER_FLAVOR\" = \"staging\" ] || [[ \"$CONFIGURATION\" =~ [Ss]taging ]]; then\n    PLIST_SRC=\"${PROJECT_DIR}/Runner/Firebase/Staging/GoogleService-Info.plist\"\n    echo \"Selected Staging Firebase configuration from ${PLIST_SRC}\"\nelse\n    PLIST_SRC=\"${PROJECT_DIR}/Runner/Firebase/Production/GoogleService-Info.plist\"\n    echo \"Selected Production Firebase configuration from ${PLIST_SRC}\"\nfi\n\nif [ -f \"$PLIST_SRC\" ]; then\n    cp -f \"$PLIST_SRC\" \"$PLIST_DEST\"\nelse\n    echo \"warning: Firebase plist not found at ${PLIST_SRC}.\"\nfi\n";
 		};
 /* End PBXShellScriptBuildPhase section */
 

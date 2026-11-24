@@ -14,4 +14,19 @@ platform :android do
     release_notes: "First Fastlane Firebase Distribution",
     upload_timeout: 900
   )  end
+
+  desc "Lane For Android Firebase App Distribution (Staging)"
+  lane :firebase_distribution_staging do
+    sh "flutter clean"
+    sh "flutter build apk --release --flavor staging --target lib/main_staging.dart --no-tree-shake-icons"
+    firebase_app_distribution(
+      app: ENV["STAGING_FIREBASE_APP_ID"] || "1:194789753908:android:staging_app",
+      service_credentials_file: ENV["GOOGLE_APPLICATION_CREDENTIALS"],
+      android_artifact_type: "APK",
+      android_artifact_path: "../build/app/outputs/apk/staging/release/app-staging-release.apk",
+      testers: ENV["STAGING_TESTERS"] || "staging-testers@example.com",
+      release_notes: ENV["STAGING_RELEASE_NOTES"] || "ChatUp Staging Build",
+      upload_timeout: 900
+    )
+  end
 end
