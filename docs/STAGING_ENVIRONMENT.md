@@ -7,8 +7,10 @@ ChatUp uses dedicated, isolated Firebase environments to ensure absolute product
 | Environment | Firebase Project ID | Firebase Project Number | Android Application ID | iOS Bundle Identifier | Entry Point | Firebase Options File |
 | :--- | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Production** | `chat-app-28ac0` | `639830188590` | `com.example.chat_app` | `com.example.chatApp` | `lib/main_production.dart` | `lib/firebase_options.dart` |
-| **Staging** | `study-buddy-54266` | `194789753908` | `com.example.chat_app.staging` | `com.example.chatApp.staging` | `lib/main_staging.dart` | `lib/firebase_options_staging.dart` |
-| **Development** | Local Emulators (`fail-closed`) | N/A | `com.example.chat_app.dev` | `com.example.chatApp.dev` | `lib/main_development.dart` | `lib/firebase_options.dart` (Emulators) |
+| **Staging** | `study-buddy-54266` | `194789753908` | `com.example.chat_app.staging` | `com.example.chatApp.staging` | `lib/main_staging.dart` | `lib/firebase_options_staging.dart` (wrapper) |
+| **Development** | Local Emulators (`fail-closed`) | N/A | `com.example.chat_app.dev` | `Not Configured` (See note)* | `lib/main_development.dart` | `lib/firebase_options.dart` (Emulators) |
+
+*\*Note on Development iOS Flavor: A dedicated Development iOS Xcode scheme and configurations (`com.example.chatApp.dev`) are outside the current scope and are not currently configured in Xcode (`Runner.xcodeproj`). iOS currently configures shared schemes for Production (`Runner.xcscheme`) and Staging (`staging.xcscheme`). To run against local emulators on iOS Simulator, developers execute `flutter run -t lib/main_development.dart`.*
 
 ---
 
@@ -69,14 +71,41 @@ The Google Services Gradle plugin resolves `google-services.json` per flavor:
 - `android/app/src/staging/google-services.json` (Staging)
 - `android/app/google-services.json` (Default root fallback)
 
-### iOS Schemes & Environment Selection (`ios/Runner.xcodeproj`)
-- Production scheme: `Runner.xcscheme` (Production plist)
-- Staging scheme: `Staging.xcscheme` (Staging plist)
+### iOS Schemes, Configurations & Environment Selection (`ios/Runner.xcodeproj`)
+- Production scheme: `Runner.xcscheme` (Bundle ID: `com.example.chatApp`, Production plist)
+- Staging scheme: `staging.xcscheme` (Bundle ID: `com.example.chatApp.staging`, Staging plist)
+- Development scheme: *Not configured* (Development iOS scheme is outside current scope; see note above).
+- Dedicated Xcode Build Configurations:
+  - Production: `Debug`, `Profile`, `Release`
+  - Staging: `Debug-staging`, `Profile-staging`, `Release-staging`
+- CocoaPods Configuration Mapping (`ios/Podfile`):
+  ```ruby
+  project 'Runner', {
+    'Debug' => :debug,
+    'Profile' => :release,
+    'Release' => :release,
+
+    'Debug-staging' => :debug,
+    'Profile-staging' => :release,
+    'Release-staging' => :release,
+  }
+  ```
 - Environment-specific plist storage:
   - `ios/Runner/Firebase/Production/GoogleService-Info.plist`
   - `ios/Runner/Firebase/Staging/GoogleService-Info.plist`
 - Automated Build Phase Run Script in Xcode (`Runner.xcodeproj/project.pbxproj`):
-  Copies the appropriate flavor plist to `${BUILT_PRODUCTS_DIR}/${PRODUCT_NAME}.app/GoogleService-Info.plist` at build time based on `$FLUTTER_FLAVOR` and `$CONFIGURATION`.
+  Deterministic POSIX shell script selecting the appropriate flavor plist based on `$FLUTTER_FLAVOR` or `$CONFIGURATION` and failing closed (`exit 1`) if the configuration is unknown or if the requested plist does not exist. Staging never falls back to Production.
+
+### Generating Staging Firebase Configuration (Once IAM is Authorized)
+When cloud IAM access to project `study-buddy-54266` is granted:
+```bash
+flutterfire configure \
+  --project=study-buddy-54266 \
+  --out=lib/firebase_options_staging.generated.dart \
+  --android-package-name=com.example.chat_app.staging \
+  --ios-bundle-id=com.example.chatApp.staging
+```
+The wrapper `lib/firebase_options_staging.dart` automatically validates and exposes the generated options via `DefaultFirebaseOptionsStaging`.
 
 ---
 

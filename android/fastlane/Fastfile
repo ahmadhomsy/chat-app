@@ -25,8 +25,28 @@ platform :android do
     UI.user_error!("Missing required environment variable GOOGLE_APPLICATION_CREDENTIALS for staging distribution") if service_creds.nil? || service_creds.strip.empty?
     UI.user_error!("Missing required environment variable STAGING_TESTERS for staging distribution") if testers.nil? || testers.strip.empty?
 
-    unless staging_app_id.start_with?("1:194789753908:")
-      UI.user_error!("STAGING_FIREBASE_APP_ID '#{staging_app_id}' does not match expected staging project number 194789753908")
+    unless staging_app_id.start_with?("1:194789753908:android:")
+      UI.user_error!("STAGING_FIREBASE_APP_ID '#{staging_app_id}' is invalid: must begin with '1:194789753908:android:' (cannot accept iOS or non-staging app ID)")
+    end
+
+    # Cross-verify with google-services.json
+    google_services_path = File.expand_path("../app/src/staging/google-services.json", __dir__)
+    if File.exist?(google_services_path)
+      require 'json'
+      gs_content = JSON.parse(File.read(google_services_path))
+      clients = gs_content["client"] || []
+      staging_client = clients.find { |c| c.dig("client_info", "android_client_info", "package_name") == "com.example.chat_app.staging" }
+      gs_app_id = staging_client&.dig("client_info", "mobilesdk_app_id")
+
+      if gs_app_id.nil? || gs_app_id.strip.empty?
+        UI.user_error!("No matching client with package 'com.example.chat_app.staging' found in #{google_services_path}")
+      end
+
+      if gs_app_id != staging_app_id
+        UI.user_error!("STAGING_FIREBASE_APP_ID ('#{staging_app_id}') does not match mobilesdk_app_id in google-services.json ('#{gs_app_id}')")
+      end
+    else
+      UI.user_error!("Staging google-services.json not found at #{google_services_path}")
     end
 
     sh "flutter clean"

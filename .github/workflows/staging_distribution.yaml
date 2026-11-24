@@ -75,17 +75,20 @@ jobs:
           service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_STAGING }}
           create_credentials_file: true
 
-      - name: Decode Staging google-services.json
+      - name: Decode and Validate Staging google-services.json
         env:
           STAGING_GOOGLE_JSON: ${{ secrets.STAGING_GOOGLE_SERVICES_JSON_BASE64 }}
         run: |
           mkdir -p android/app/src/staging
           echo "$STAGING_GOOGLE_JSON" | base64 --decode > android/app/src/staging/google-services.json
+          node tool/validate_staging_google_services.js android/app/src/staging/google-services.json
 
-      - name: Decode Staging firebase_options.dart
+      - name: Decode and Validate Staging firebase_options_staging.generated.dart
         env:
           STAGING_FIREBASE_OPTIONS: ${{ secrets.STAGING_FIREBASE_OPTIONS_BASE64 }}
-        run: echo "$STAGING_FIREBASE_OPTIONS" | base64 --decode > lib/firebase_options_staging.dart
+        run: |
+          echo "$STAGING_FIREBASE_OPTIONS" | base64 --decode > lib/firebase_options_staging.generated.dart
+          flutter test tool/validate_staging_options.dart
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
