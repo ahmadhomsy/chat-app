@@ -33,6 +33,39 @@ jobs:
         with:
           channel: stable
 
+      - name: Validate Staging Environment Secrets Preflight
+        env:
+          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          WIF_SA: ${{ secrets.GCP_SERVICE_ACCOUNT_STAGING }}
+          STAGING_APP_ID: ${{ secrets.STAGING_FIREBASE_APP_ID }}
+          STAGING_TESTERS: ${{ secrets.STAGING_TESTERS }}
+          STAGING_GOOGLE_JSON: ${{ secrets.STAGING_GOOGLE_SERVICES_JSON_BASE64 }}
+          STAGING_FIREBASE_OPTIONS: ${{ secrets.STAGING_FIREBASE_OPTIONS_BASE64 }}
+        run: |
+          echo "Running preflight checks for required staging secrets..."
+          MISSING=0
+          check_secret() {
+            NAME="$1"
+            VAL="$2"
+            if [ -z "$VAL" ]; then
+              echo "::error::Required secret $NAME is missing or empty"
+              MISSING=1
+            else
+              echo "Verified presence of secret $NAME"
+            fi
+          }
+          check_secret "GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING" "$WIF_PROVIDER"
+          check_secret "GCP_SERVICE_ACCOUNT_STAGING" "$WIF_SA"
+          check_secret "STAGING_FIREBASE_APP_ID" "$STAGING_APP_ID"
+          check_secret "STAGING_TESTERS" "$STAGING_TESTERS"
+          check_secret "STAGING_GOOGLE_SERVICES_JSON_BASE64" "$STAGING_GOOGLE_JSON"
+          check_secret "STAGING_FIREBASE_OPTIONS_BASE64" "$STAGING_FIREBASE_OPTIONS"
+          if [ "$MISSING" -ne 0 ]; then
+            echo "Preflight check failed: One or more required staging secrets are missing."
+            exit 1
+          fi
+          echo "All staging secrets verified successfully."
+
       # Authenticate to GCP using Workload Identity Federation (OIDC) without long-lived keys or FIREBASE_TOKEN
       - name: Authenticate to Google Cloud (Staging Workload Identity)
         uses: google-github-actions/auth@v2

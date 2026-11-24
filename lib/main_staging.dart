@@ -7,6 +7,11 @@ import 'package:chat_app/injection_container.dart';
 import 'package:flutter/material.dart';
 
 void main() async {
+  // Staging environment fails closed until real Firebase App registration is completed in study-buddy-54266.
+  if (!DefaultFirebaseOptionsStaging.isConfigured) {
+    throw const UnconfiguredStagingEnvironmentException();
+  }
+
   WidgetsFlutterBinding.ensureInitialized();
   await Bootstrap.init(
     firebaseOptions: DefaultFirebaseOptionsStaging.currentPlatform,

@@ -17,14 +17,26 @@ platform :android do
 
   desc "Lane For Android Firebase App Distribution (Staging)"
   lane :firebase_distribution_staging do
+    staging_app_id = ENV["STAGING_FIREBASE_APP_ID"]
+    service_creds = ENV["GOOGLE_APPLICATION_CREDENTIALS"]
+    testers = ENV["STAGING_TESTERS"]
+
+    UI.user_error!("Missing required environment variable STAGING_FIREBASE_APP_ID for staging distribution") if staging_app_id.nil? || staging_app_id.strip.empty?
+    UI.user_error!("Missing required environment variable GOOGLE_APPLICATION_CREDENTIALS for staging distribution") if service_creds.nil? || service_creds.strip.empty?
+    UI.user_error!("Missing required environment variable STAGING_TESTERS for staging distribution") if testers.nil? || testers.strip.empty?
+
+    unless staging_app_id.start_with?("1:194789753908:")
+      UI.user_error!("STAGING_FIREBASE_APP_ID '#{staging_app_id}' does not match expected staging project number 194789753908")
+    end
+
     sh "flutter clean"
     sh "flutter build apk --release --flavor staging --target lib/main_staging.dart --no-tree-shake-icons"
     firebase_app_distribution(
-      app: ENV["STAGING_FIREBASE_APP_ID"] || "1:194789753908:android:staging_app",
-      service_credentials_file: ENV["GOOGLE_APPLICATION_CREDENTIALS"],
+      app: staging_app_id,
+      service_credentials_file: service_creds,
       android_artifact_type: "APK",
       android_artifact_path: "../build/app/outputs/apk/staging/release/app-staging-release.apk",
-      testers: ENV["STAGING_TESTERS"] || "staging-testers@example.com",
+      testers: testers,
       release_notes: ENV["STAGING_RELEASE_NOTES"] || "ChatUp Staging Build",
       upload_timeout: 900
     )

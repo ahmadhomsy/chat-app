@@ -17,48 +17,29 @@ void main() {
       expect(DefaultFirebaseOptions.ios.iosBundleId, 'com.example.chatApp');
     });
 
-    test('Staging FirebaseOptions targets study-buddy-54266 exclusively', () {
-      expect(
-        DefaultFirebaseOptionsStaging.android.projectId,
-        'study-buddy-54266',
-      );
-      expect(
-        DefaultFirebaseOptionsStaging.android.messagingSenderId,
-        '194789753908',
-      );
-      expect(
-        DefaultFirebaseOptionsStaging.android.storageBucket,
-        'study-buddy-54266.firebasestorage.app',
-      );
+    test('Staging FirebaseOptions is unconfigured and fails closed', () {
+      expect(DefaultFirebaseOptionsStaging.isConfigured, isFalse);
 
-      expect(DefaultFirebaseOptionsStaging.ios.projectId, 'study-buddy-54266');
       expect(
-        DefaultFirebaseOptionsStaging.ios.messagingSenderId,
-        '194789753908',
+        () => DefaultFirebaseOptionsStaging.currentPlatform,
+        throwsA(isA<UnconfiguredStagingEnvironmentException>()),
       );
       expect(
-        DefaultFirebaseOptionsStaging.ios.iosBundleId,
-        'com.example.chatApp.staging',
+        () => DefaultFirebaseOptionsStaging.android,
+        throwsA(isA<UnconfiguredStagingEnvironmentException>()),
+      );
+      expect(
+        () => DefaultFirebaseOptionsStaging.ios,
+        throwsA(isA<UnconfiguredStagingEnvironmentException>()),
       );
     });
 
-    test('Production and Staging have completely independent resources', () {
-      expect(
-        DefaultFirebaseOptions.android.projectId,
-        isNot(equals(DefaultFirebaseOptionsStaging.android.projectId)),
-      );
-      expect(
-        DefaultFirebaseOptions.android.messagingSenderId,
-        isNot(equals(DefaultFirebaseOptionsStaging.android.messagingSenderId)),
-      );
-      expect(
-        DefaultFirebaseOptions.android.storageBucket,
-        isNot(equals(DefaultFirebaseOptionsStaging.android.storageBucket)),
-      );
-      expect(
-        DefaultFirebaseOptions.ios.iosBundleId,
-        isNot(equals(DefaultFirebaseOptionsStaging.ios.iosBundleId)),
-      );
-    });
+    test(
+      'Production options are not affected by unconfigured Staging options',
+      () {
+        expect(DefaultFirebaseOptions.android.projectId, 'chat-app-28ac0');
+        expect(DefaultFirebaseOptions.ios.projectId, 'chat-app-28ac0');
+      },
+    );
   });
 }

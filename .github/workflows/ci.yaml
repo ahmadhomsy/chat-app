@@ -92,4 +92,4 @@ jobs:
 
       - name: Run Firebase Security Rules against Live Emulators
         working-directory: ./functions
-        run: firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
+        run: firebase emulators:exec --project chat-app-28ac0 --only "firestore,storage,database" "npm run test:rules"
