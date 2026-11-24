@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:awesome_dialog/awesome_dialog.dart';
 import 'package:chat_app/core/theme/app_theme.dart';
 import 'package:chat_app/features/splash/presentation/cubit/splash_cubit.dart';
@@ -41,14 +42,44 @@ class _SplashScreenState extends State<SplashScreen>
 
     _scaleAnimation = Tween<double>(begin: 0.6, end: 1).animate(scaleCurve);
     _fadeAnimation = Tween<double>(begin: 0, end: 1).animate(fadeCurve);
-    _controller.forward();
+    unawaited(_controller.forward());
 
-    // استدعاء الدالة async بدون await
-    _initialize();
+    unawaited(_initialize());
   }
 
   Future<void> _initialize() async {
     await context.read<SplashCubit>().initializeApp();
+  }
+
+  void _handleNavigation(SplashState state) {
+    if (!mounted) return;
+
+    if (state is VerifiedError) {
+      context.go('/VerifyEmailScreen');
+    } else if (state is SplashUnauthenticated) {
+      context.go('/signIn');
+    } else if (state is SplashAuthenticated) {
+      context.go('/home');
+    }
+  }
+
+  Future<void> _showErrorDialog(String message) async {
+    if (!mounted) return;
+
+    await AwesomeDialog(
+      context: context,
+      dismissOnTouchOutside: false,
+      dismissOnBackKeyPress: false,
+      dialogType: DialogType.error,
+      animType: AnimType.rightSlide,
+      title: 'Error',
+      desc: message,
+      btnOkText: 'Retry',
+      btnOkColor: const Color(0xFFE53935),
+      btnOkOnPress: () {
+        unawaited(context.read<SplashCubit>().initializeApp());
+      },
+    ).show();
   }
 
   @override
@@ -61,34 +92,11 @@ class _SplashScreenState extends State<SplashScreen>
   Widget build(BuildContext context) {
     return Scaffold(
       body: BlocListener<SplashCubit, SplashState>(
-        listener: (context, state) async {
+        listener: (context, state) {
           if (state is SplashError) {
-            // context.go('/VerifyEmailScreen');
-
-            await AwesomeDialog(
-              context: context,
-              dismissOnTouchOutside: false,
-              dismissOnBackKeyPress: false,
-              dialogType: DialogType.error,
-              animType: AnimType.rightSlide,
-              title: 'Error',
-              desc: state.message,
-              btnOkText: 'اعادة المحاولة',
-              btnOkColor: const Color(0xFFE53935),
-              btnOkOnPress: () async {
-                await context.read<SplashCubit>().initializeApp();
-              },
-            ).show();
-          }
-
-          if (state is VerifiedError) {
-            context.go('/VerifyEmailScreen');
-          }
-          if (state is SplashUnauthenticated) {
-            context.go('/signUp');
-          }
-          if (state is SplashAuthenticated) {
-            context.go('/home');
+            unawaited(_showErrorDialog(state.message));
+          } else {
+            _handleNavigation(state);
           }
         },
         child: Container(
@@ -99,24 +107,13 @@ class _SplashScreenState extends State<SplashScreen>
             child: Column(
               children: [
                 const Spacer(flex: 3),
-                AnimatedBuilder(
-                  animation: _controller,
-                  builder: (_, child) {
-                    return Opacity(
-                      opacity: _fadeAnimation.value,
-                      child: Transform.scale(
-                        scale: _scaleAnimation.value,
-                        child: child,
-                      ),
-                    );
-                  },
-                  child: Semantics(
-                    label: 'Chat application logo',
-                    image: true,
+                FadeTransition(
+                  opacity: _fadeAnimation,
+                  child: ScaleTransition(
+                    scale: _scaleAnimation,
                     child: const AppLogo(),
                   ),
                 ),
-
                 SizedBox(height: 24.h),
                 Text(
                   'ChatApp',

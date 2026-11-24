@@ -3,7 +3,6 @@ import 'package:chat_app/features/auth/domain/repositories/auth_repositories.dar
 import 'package:dartz/dartz.dart';
 
 class DeleteUseCase {
-
   DeleteUseCase(this.repository);
   final AuthRepositories repository;
 

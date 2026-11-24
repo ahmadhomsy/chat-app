@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:awesome_dialog/awesome_dialog.dart';
 import 'package:chat_app/core/theme/app_text_styles.dart';
 import 'package:chat_app/core/theme/app_theme.dart';
@@ -15,29 +17,32 @@ import 'package:go_router/go_router.dart';
 class SignUpPage extends StatelessWidget {
   const SignUpPage({super.key});
 
+  void _showErrorDialog(BuildContext context, String message) {
+    unawaited(
+      AwesomeDialog(
+        context: context,
+        dialogType: DialogType.error,
+        animType: AnimType.bottomSlide,
+        title: 'Error',
+        desc: message,
+        btnOkText: 'حسناً',
+        btnOkColor: const Color(0xFFE53935),
+        btnOkOnPress: () {},
+      ).show(),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       body: BlocListener<AuthBloc, AuthState>(
         listener: (context, state) {
           if (state is AuthError) {
-            AwesomeDialog(
-              context: context,
-              dismissOnTouchOutside: false,
-              dismissOnBackKeyPress: false,
-              dialogType: DialogType.error,
-              animType: AnimType.bottomSlide,
-              title: 'Error',
-              desc: state.message,
-              btnOkText: 'اعادة المحاولة',
-              btnOkColor: const Color(0xFFE53935),
-              btnOkOnPress: () {},
-            ).show();
-          }
-          if (state is AuthSuccess) {
+            _showErrorDialog(context, state.message);
+          } else if (state is SignUpSuccess ||
+              state is AuthNeedsEmailVerification) {
             context.go('/VerifyEmailScreen');
-          }
-          if (state is GoogleSuccess) {
+          } else if (state is GoogleSuccess) {
             context.go('/home');
           }
         },

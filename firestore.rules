@@ -1,0 +1,362 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+
+    function isParticipant(conversationId) {
+      return isAuthenticated() &&
+        request.auth.uid in get(/databases/$(database)/documents/conversations/$(conversationId)).data.participantIds;
+    }
+
+    function getConversation(conversationId) {
+      return get(/databases/$(database)/documents/conversations/$(conversationId)).data;
+    }
+
+    function getConversationAfter(conversationId) {
+      return getAfter(/databases/$(database)/documents/conversations/$(conversationId)).data;
+    }
+
+    // Checks if the caller is an active group administrator who is also a participant
+    // Prevents outsiders maliciously listed in adminIds from gaining administrative authority
+    function isGroupAdmin(conv) {
+      return isAuthenticated()
+             && conv.type == 'group'
+             && ('adminIds' in conv)
+             && ('participantIds' in conv)
+             && conv.adminIds is list
+             && conv.participantIds is list
+             && request.auth.uid in conv.adminIds
+             && request.auth.uid in conv.participantIds;
+    }
+
+    // Validates administrator list integrity and last-usable-administrator invariant:
+    // - adminIds must be a list containing 1 to 100 unique administrators
+    // - Every administrator must belong to participantIds (adminIds subset of participantIds)
+    // - adminIds[0] must be a valid, non-empty string UID (size 1-128) belonging to participantIds,
+    //   guaranteeing that the group always retains at least one usable administrator who can authenticate
+    // - Up to 8 administrators are explicitly verified to be valid bounded string UIDs (size 1-128)
+    function isValidAdminList(adminIds, participantIds) {
+      return adminIds is list
+             && adminIds.size() >= 1
+             && adminIds.size() <= 100
+             && adminIds.toSet().size() == adminIds.size()
+             && participantIds.hasAll(adminIds)
+             && adminIds[0] is string
+             && adminIds[0].size() > 0
+             && adminIds[0].size() <= 128
+             && adminIds[0] in participantIds
+             && (adminIds.size() < 2 || (adminIds[1] is string && adminIds[1].size() > 0 && adminIds[1].size() <= 128))
+             && (adminIds.size() < 3 || (adminIds[2] is string && adminIds[2].size() > 0 && adminIds[2].size() <= 128))
+             && (adminIds.size() < 4 || (adminIds[3] is string && adminIds[3].size() > 0 && adminIds[3].size() <= 128))
+             && (adminIds.size() < 5 || (adminIds[4] is string && adminIds[4].size() > 0 && adminIds[4].size() <= 128))
+             && (adminIds.size() < 6 || (adminIds[5] is string && adminIds[5].size() > 0 && adminIds[5].size() <= 128))
+             && (adminIds.size() < 7 || (adminIds[6] is string && adminIds[6].size() > 0 && adminIds[6].size() <= 128))
+             && (adminIds.size() < 8 || (adminIds[7] is string && adminIds[7].size() > 0 && adminIds[7].size() <= 128));
+    }
+
+    // Validates a single participant snapshot contract
+    // hasOnly guarantees that ONLY id, name, photoUrl, isOnline, lastSeen can exist (rejects email, role, etc.)
+    function isValidParticipantSnapshot(data) {
+      return data is map
+             && data.keys().hasOnly(['id', 'name', 'photoUrl', 'isOnline', 'lastSeen'])
+             && (!('id' in data) || (data.id is string && data.id.size() > 0 && data.id.size() <= 128))
+             && (!('name' in data) || (data.name is string && data.name.size() > 0 && data.name.size() <= 100))
+             && (!('photoUrl' in data) || data.photoUrl == null || (data.photoUrl is string && data.photoUrl.size() <= 2048))
+             && (!('isOnline' in data) || data.isOnline is bool)
+             && (!('lastSeen' in data) || data.lastSeen == null || data.lastSeen is timestamp);
+    }
+
+    // Validates direct conversation participant snapshots (exactly 2 participants)
+    function isValidDirectParticipants(participants, pIds) {
+      return participants is map
+             && participants.keys().hasOnly(pIds)
+             && isValidParticipantSnapshot(participants[pIds[0]])
+             && isValidParticipantSnapshot(participants[pIds[1]]);
+    }
+
+    // Default deny all
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Internal Cloud Functions metadata collections: strictly inaccessible to client SDKs
+    match /_function_events/{eventId} {
+      allow read, write: if false;
+    }
+
+    match /_cleanup_progress/{uid} {
+      allow read, write: if false;
+    }
+
+    match /_rate_limits/{docId} {
+      allow read, write: if false;
+    }
+
+    // Private Users Collection
+    // STRICT PRIVACY: Only the account owner can read their private profile document.
+    // Contains sensitive metadata: email, provider, createdAt.
+    match /users/{userId} {
+      allow read: if isOwner(userId);
+
+      // Account owner creates their initial profile with strict field allowlist
+      // Prohibits client injection of role, admin, status, privilege, or server-controlled fields
+      allow create: if isOwner(userId)
+                    && request.resource.data.keys().hasOnly(['name', 'email', 'photoUrl', 'lastSeen', 'isOnline', 'createdAt', 'provider', 'phone'])
+                    && request.resource.data.email is string
+                    && request.resource.data.email.size() > 0
+                    && request.resource.data.email.size() <= 254
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100
+                    && request.resource.data.isOnline == false
+                    && request.resource.data.lastSeen == null
+                    && request.resource.data.provider in ['email', 'google']
+                    && request.resource.data.createdAt is timestamp
+                    && (!('photoUrl' in request.resource.data) || request.resource.data.photoUrl == null || request.resource.data.photoUrl is string)
+                    && (!('phone' in request.resource.data) || request.resource.data.phone is string);
+
+      // Strict field allowlist on profile updates:
+      // Users CANNOT update isOnline, lastSeen, role, email, provider, createdAt.
+      allow update: if isOwner(userId)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photoUrl', 'updatedAt'])
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100
+                    && (!('photoUrl' in request.resource.data) || request.resource.data.photoUrl == null || request.resource.data.photoUrl is string);
+
+      allow delete: if isOwner(userId);
+
+      // Private FCM Tokens Subcollection: only the device owner can manage their tokens
+      match /fcmTokens/{tokenId} {
+        allow read, write: if isOwner(userId);
+      }
+    }
+
+    // Public Users Discovery Collection
+    // Contains non-sensitive profile projection: id, name, photoUrl, isOnline, lastSeen, createdAt, updatedAt.
+    // Excludes email and private security metadata to prevent enumeration.
+    match /public_users/{userId} {
+      allow read: if isAuthenticated();
+
+      allow create: if isOwner(userId)
+                    && request.resource.data.keys().hasOnly(['id', 'name', 'photoUrl', 'isOnline', 'lastSeen', 'createdAt', 'updatedAt'])
+                    && request.resource.data.id == userId
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100
+                    && request.resource.data.isOnline == false
+                    && request.resource.data.lastSeen == null;
+
+      // Account owners can update only presentation fields; presence fields (isOnline, lastSeen) are server-authoritative
+      allow update: if isOwner(userId)
+                    && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photoUrl', 'updatedAt'])
+                    && request.resource.data.name is string
+                    && request.resource.data.name.size() > 0
+                    && request.resource.data.name.size() <= 100;
+
+      allow delete: if isOwner(userId);
+    }
+
+    // Conversations Collection
+    match /conversations/{conversationId} {
+      // Must be an active participant to read the conversation
+      allow read: if isAuthenticated() && request.auth.uid in resource.data.participantIds;
+
+      // Creation rules:
+      // Direct: exactly 2 participants, deterministic document ID, createdBy is auth user
+      // Group: 2 to 100 participants, 1 to 100 admins, createdBy is auth user and admin
+      allow create: if isAuthenticated()
+                    && request.auth.uid in request.resource.data.participantIds
+                    && request.resource.data.createdBy == request.auth.uid
+                    && (
+                      (
+                        request.resource.data.type == 'direct'
+                        && request.resource.data.participantIds is list
+                        && request.resource.data.participantIds.size() == 2
+                        && request.resource.data.participantIds.toSet().size() == 2
+                        && request.resource.data.participantIds[0] != request.resource.data.participantIds[1]
+                        && request.resource.data.participantIds[0] is string
+                        && request.resource.data.participantIds[0].size() > 0
+                        && request.resource.data.participantIds[0].size() <= 128
+                        && request.resource.data.participantIds[1] is string
+                        && request.resource.data.participantIds[1].size() > 0
+                        && request.resource.data.participantIds[1].size() <= 128
+                        && conversationId == (request.resource.data.participantIds[0] < request.resource.data.participantIds[1]
+                           ? request.resource.data.participantIds[0] + '_' + request.resource.data.participantIds[1]
+                           : request.resource.data.participantIds[1] + '_' + request.resource.data.participantIds[0])
+                        && (!('participants' in request.resource.data) || isValidDirectParticipants(request.resource.data.participants, request.resource.data.participantIds))
+                      ) || (
+                        request.resource.data.type == 'group'
+                        && request.resource.data.participantIds is list
+                        && request.resource.data.participantIds.size() >= 2
+                        && request.resource.data.participantIds.size() <= 100
+                        && request.resource.data.participantIds.toSet().size() == request.resource.data.participantIds.size()
+                        && isValidAdminList(request.resource.data.adminIds, request.resource.data.participantIds)
+                        && request.auth.uid in request.resource.data.adminIds
+                        && request.auth.uid in request.resource.data.participantIds
+                        && request.resource.data.groupName is string
+                        && request.resource.data.groupName.size() > 0
+                        && request.resource.data.groupName.size() <= 100
+                        && (!('participants' in request.resource.data) || request.resource.data.participants.keys().size() == 0)
+                      )
+                    );
+
+      // Update rules:
+      // - Immutable fields: createdBy, type, createdAt cannot be changed
+      // - Direct: participantIds cannot change, adminIds cannot be injected, participants snapshot immutable
+      // - Group non-admin: can ONLY update message-preview fields and own read receipt
+      // - Group admin: can update groupName, groupAvatar, participantIds, adminIds
+      // - lastReadAtByUser: only the authenticated user's own read receipt entry can be modified
+      allow update: if isAuthenticated()
+                    && request.auth.uid in resource.data.participantIds
+                    && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['createdBy', 'type', 'createdAt'])
+                    && (
+                      // Direct conversation updates: participants immutable, only message-preview & read receipts
+                      (
+                        resource.data.type == 'direct'
+                        && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'lastMessageSenderId', 'lastMessageSenderName', 'updatedAt', 'lastReadAtByUser'])
+                        && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
+                        && request.resource.data.participantIds == resource.data.participantIds
+                      ) || (
+                        // Group conversation updates:
+                        resource.data.type == 'group'
+                        && (
+                          // Non-admin member: only preview fields and own read receipt
+                          (
+                            !isGroupAdmin(resource.data)
+                            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['lastMessage', 'lastMessageAt', 'lastMessageSenderId', 'lastMessageSenderName', 'updatedAt', 'lastReadAtByUser'])
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
+                          ) || (
+                            // Admin member: permitted group management fields
+                            isGroupAdmin(resource.data)
+                            && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['groupName', 'groupAvatar', 'participantIds', 'adminIds', 'updatedAt', 'lastMessage', 'lastMessageAt', 'lastMessageSenderId', 'lastMessageSenderName', 'lastReadAtByUser'])
+                            && request.resource.data.participantIds is list
+                            && request.resource.data.participantIds.size() >= 2
+                            && request.resource.data.participantIds.size() <= 100
+                            && request.resource.data.participantIds.toSet().size() == request.resource.data.participantIds.size()
+                            && isValidAdminList(request.resource.data.adminIds, request.resource.data.participantIds)
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['groupName']) || (request.resource.data.groupName is string && request.resource.data.groupName.size() > 0 && request.resource.data.groupName.size() <= 100))
+                            && (!request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastMessageSenderId']) || request.resource.data.lastMessageSenderId == request.auth.uid)
+                          )
+                        )
+                      )
+                    )
+                    && (
+                      !request.resource.data.diff(resource.data).affectedKeys().hasAny(['lastReadAtByUser'])
+                      || (!('lastReadAtByUser' in resource.data)
+                          ? request.resource.data.lastReadAtByUser.keys().hasOnly([request.auth.uid])
+                          : request.resource.data.lastReadAtByUser.diff(resource.data.lastReadAtByUser).affectedKeys().hasOnly([request.auth.uid]))
+                    );
+
+      // Deletion: conversation creator or group admin
+      allow delete: if isAuthenticated()
+                    && (
+                      request.auth.uid == resource.data.createdBy
+                      || isGroupAdmin(resource.data)
+                    );
+
+      // Participants Subcollection: Dedicated per-participant documents
+      // Replaces variable-length embedded maps, scaling safely to 100 members without AST expression limits
+      match /participants/{participantUid} {
+        // Read: Any conversation participant can view participant profiles
+        allow read: if isParticipant(conversationId);
+
+        // Create:
+        // - During direct conversation creation by the creator
+        // - Or during group administration by an authorized group admin adding a member
+        // Document ID must match participant UID
+        // Participant must be in parent conversation's participantIds
+        // Enforces strict snapshot allowlist: only id, name, photoUrl, isOnline, lastSeen
+        allow create: if isAuthenticated()
+                      && (
+                        (exists(/databases/$(database)/documents/conversations/$(conversationId))
+                          && (
+                            (getConversation(conversationId).type == 'direct' && request.auth.uid == getConversation(conversationId).createdBy)
+                            || isGroupAdmin(getConversation(conversationId))
+                          )
+                          && participantUid in getConversation(conversationId).participantIds
+                        ) || (
+                          existsAfter(/databases/$(database)/documents/conversations/$(conversationId))
+                          && (
+                            (getConversationAfter(conversationId).type == 'direct' && request.auth.uid == getConversationAfter(conversationId).createdBy)
+                            || isGroupAdmin(getConversationAfter(conversationId))
+                          )
+                          && participantUid in getConversationAfter(conversationId).participantIds
+                        )
+                      )
+                      && request.resource.data.id == participantUid
+                      && isValidParticipantSnapshot(request.resource.data);
+
+        // Update:
+        // - Group admin managing membership presentation metadata
+        // - Or the active participant updating their own public profile presentation fields
+        // Must be a current participant
+        // Cannot alter document ID, presence fields (isOnline, lastSeen are server-authoritative), role, email, etc.
+        allow update: if isAuthenticated()
+                      && isParticipant(conversationId)
+                      && (
+                        isGroupAdmin(getConversation(conversationId))
+                        || request.auth.uid == participantUid
+                      )
+                      && request.resource.data.id == participantUid
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['name', 'photoUrl'])
+                      && isValidParticipantSnapshot(request.resource.data);
+
+        // Delete:
+        // - Authorized group admin removing a member
+        // - ATOMIC PARTICIPANT REMOVAL: Standalone deletion of a participant document alone is rejected.
+        // - Target participantUid must NOT be present in the post-write parent conversation's participantIds.
+        // - Post-write parent conversation must maintain valid group administration (at least 1 admin remaining).
+        // - Or if the parent conversation itself was deleted in the batch.
+        allow delete: if isAuthenticated()
+                      && isGroupAdmin(getConversation(conversationId))
+                      && (
+                        (!existsAfter(/databases/$(database)/documents/conversations/$(conversationId)))
+                        || (
+                          !(participantUid in getConversationAfter(conversationId).participantIds)
+                          && isGroupAdmin(getConversationAfter(conversationId))
+                        )
+                      );
+      }
+
+      // Messages Subcollection
+      match /messages/{messageId} {
+        allow read: if isParticipant(conversationId);
+
+        // Message creation: strict field allowlist, participant check, senderId match, type validation, length bounds
+        allow create: if isParticipant(conversationId)
+                      && request.resource.data.keys().hasOnly(['senderId', 'senderName', 'text', 'type', 'createdAt'])
+                      && request.resource.data.senderId == request.auth.uid
+                      && (!('senderName' in request.resource.data) || (request.resource.data.senderName is string && request.resource.data.senderName.size() <= 100))
+                      && request.resource.data.type in ['text', 'image', 'file']
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() > 0
+                      && request.resource.data.text.size() <= 2000
+                      && request.resource.data.createdAt is timestamp;
+
+        // Message updates: only original sender, only text and editedAt can change, editedAt must be timestamp
+        allow update: if isParticipant(conversationId)
+                      && resource.data.senderId == request.auth.uid
+                      && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['text', 'editedAt'])
+                      && request.resource.data.text is string
+                      && request.resource.data.text.size() > 0
+                      && request.resource.data.text.size() <= 2000
+                      && request.resource.data.editedAt is timestamp;
+
+        // Deletion: sender or conversation admin
+        allow delete: if isParticipant(conversationId)
+                      && (
+                        resource.data.senderId == request.auth.uid
+                        || isGroupAdmin(getConversation(conversationId))
+                      );
+      }
+    }
+  }
+}

@@ -4,7 +4,6 @@ import 'package:chat_app/features/auth/domain/repositories/auth_repositories.dar
 import 'package:dartz/dartz.dart';
 
 class SignUpUseCase {
-
   SignUpUseCase(this.repository);
   final AuthRepositories repository;
 

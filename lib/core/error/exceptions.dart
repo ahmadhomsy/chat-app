@@ -19,3 +19,17 @@ class NotSignException implements Exception {}
 class UnExpectedException implements Exception {}
 
 class InvalidEmailException implements Exception {}
+
+class WrongPasswordException implements Exception {}
+
+class UserNotFoundException implements Exception {}
+
+class UserDisabledException implements Exception {}
+
+class RequiresRecentLoginException implements Exception {}
+
+class GoogleSignInCancelledException implements Exception {}
+
+class ResetPasswordException implements Exception {}
+
+class PermissionDeniedException implements Exception {}
