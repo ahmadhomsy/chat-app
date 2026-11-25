@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:chat_app/core/services/notification_service.dart';
 import 'package:chat_app/core/services/presence_service.dart';
 import 'package:chat_app/firebase_options.dart';
+import 'package:chat_app/firebase_options_development.dart';
 import 'package:chat_app/injection_container.dart' as di;
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:cloud_functions/cloud_functions.dart';
@@ -14,13 +15,49 @@ import 'package:flutter_screenutil/flutter_screenutil.dart';
 import 'package:get_storage/get_storage.dart';
 
 class Bootstrap {
+  static const String productionProjectId = 'chat-app-28ac0';
+  static const String stagingProjectId = 'study-buddy-54266';
+  static const String demoProjectId = 'demo-chatup';
+
+  /// Validates that emulator and cloud environments are strictly segregated.
+  /// Rejects production and staging options when useEmulators is true.
+  /// Rejects demo options when useEmulators is false.
+  static void validateConfiguration({
+    required FirebaseOptions options,
+    required bool useEmulators,
+  }) {
+    if (useEmulators) {
+      if (options.projectId == productionProjectId ||
+          options.projectId == stagingProjectId) {
+        throw StateError(
+          'FATAL: Local emulators cannot be configured with ${options.projectId} options. '
+          'Development emulator environment must target demo project ($demoProjectId) to prevent accidental cloud resource access or billing.',
+        );
+      }
+    } else {
+      if (options.projectId == demoProjectId) {
+        throw StateError(
+          'FATAL: Demo project ($demoProjectId) can only be executed with useEmulators: true.',
+        );
+      }
+    }
+  }
+
   static Future<void> init({
     FirebaseOptions? firebaseOptions,
     bool useEmulators = false,
   }) async {
+    final options =
+        firebaseOptions ??
+        (useEmulators
+            ? DefaultFirebaseOptionsDevelopment.currentPlatform
+            : DefaultFirebaseOptions.currentPlatform);
+
+    validateConfiguration(options: options, useEmulators: useEmulators);
+
     await ScreenUtil.ensureScreenSize();
     await Firebase.initializeApp(
-      options: firebaseOptions ?? DefaultFirebaseOptions.currentPlatform,
+      options: options,
     );
 
     if (useEmulators) {

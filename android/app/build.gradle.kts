@@ -69,3 +69,19 @@ android {
 flutter {
     source = "../.."
 }
+
+// Ensure development builds fail fast if src/development/google-services.json is missing,
+// strictly preventing accidental fallback to root/production google-services.json.
+tasks.configureEach {
+    if (name.contains("Development", ignoreCase = true) && name.contains("GoogleServices", ignoreCase = true)) {
+        doFirst {
+            val devGoogleServices = file("src/development/google-services.json")
+            if (!devGoogleServices.exists()) {
+                throw GradleException(
+                    "Missing development credentials: android/app/src/development/google-services.json is required for development flavor to prevent fallback to Production."
+                )
+            }
+        }
+    }
+}
+

@@ -37,6 +37,28 @@ Pull Request: [#1 (OPEN)](https://github.com/ahmadhomsy/chat-app/pull/1)
 
 ---
 
+## 💻 Local Portfolio Demo Environment (Zero Billing)
+
+ChatUp includes a completely isolated local demonstration environment using the **Firebase Local Emulator Suite**:
+- **Offline Demo Project ID**: `demo-chatup`
+- **Zero Cost / Zero Billing**: No Firebase Blaze plan or billing account required.
+- **Native Android & Dart Isolation**: Development flavor is strictly decoupled from Production (`chat-app-28ac0`) and Staging (`study-buddy-54266`).
+- **Complete Run Instructions**: See [docs/LOCAL_DEMO_ENVIRONMENT.md](docs/LOCAL_DEMO_ENVIRONMENT.md) for step-by-step setup, two-device real-time messaging demo, and account verification walkthrough.
+
+Quick start:
+```powershell
+# 1. Build functions
+cd functions && npm install && npm run build && cd ..
+
+# 2. Start emulators
+firebase emulators:start --project demo-chatup
+
+# 3. Run Flutter development flavor
+flutter run --flavor development -t lib/main_development.dart
+```
+
+---
+
 ## 📱 Features
 
 - **Robust Authentication**:
