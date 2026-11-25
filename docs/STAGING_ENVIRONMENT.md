@@ -179,8 +179,11 @@ If emulator connection fails, startup **fails closed** throwing a `StateError` t
 
 ### Production Distribution Workflow (`.github/workflows/flutter_ci.yaml`)
 - Bound to Production Firebase environment (`chat-app-28ac0`).
-- Triggered exclusively via explicit manual `workflow_dispatch` (manual production release gate), preventing unintended automated distribution on every push/merge to `main`.
+- Triggered exclusively via explicit manual `workflow_dispatch` (manual production release gate), preventing unintended automated distribution on push/merge.
+- Enforces job-level branch restriction (`if: github.ref == 'refs/heads/main'`), guaranteeing that non-main manual dispatches cannot execute the distribution job.
+- Release notes input is explicitly wired to Fastlane via `PRODUCTION_RELEASE_NOTES` environment variable.
 - Setup Ruby toolchain explicitly pinned to `3.2.11` (compatible with `ubuntu-latest` / `ubuntu-26.04` runner images).
+- Automated CI (`.github/workflows/ci.yaml`) includes a dedicated smoke test (`ruby_toolchain_smoke_test`) verifying Ruby 3.2.11 setup and Bundler dependency lockfile installation (`bundle exec fastlane --version`) on all pull requests.
 
 ### Dedicated GitHub Actions Workflow (`.github/workflows/staging_distribution.yaml`)
 - Bound to GitHub Environment: `staging`.
