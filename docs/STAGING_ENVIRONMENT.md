@@ -177,10 +177,16 @@ If emulator connection fails, startup **fails closed** throwing a `StateError` t
 - Lane `firebase_distribution`: builds and distributes production APK.
 - Lane `firebase_distribution_staging`: builds and distributes staging APK (`app-staging-release.apk`) using Workload Identity Federation / Application Default Credentials (`GOOGLE_APPLICATION_CREDENTIALS`).
 
+### Production Distribution Workflow (`.github/workflows/flutter_ci.yaml`)
+- Bound to Production Firebase environment (`chat-app-28ac0`).
+- Triggered exclusively via explicit manual `workflow_dispatch` (manual production release gate), preventing unintended automated distribution on every push/merge to `main`.
+- Setup Ruby toolchain explicitly pinned to `3.2.11` (compatible with `ubuntu-latest` / `ubuntu-26.04` runner images).
+
 ### Dedicated GitHub Actions Workflow (`.github/workflows/staging_distribution.yaml`)
 - Bound to GitHub Environment: `staging`.
 - Triggered exclusively on `workflow_dispatch` (manual).
 - Authenticates using Google Cloud Workload Identity Federation (OIDC) without long-lived tokens or `FIREBASE_TOKEN`.
+- Setup Ruby toolchain explicitly pinned to `3.2.11` (compatible with `ubuntu-latest` / `ubuntu-26.04` runner images).
 - Consumes environment secrets:
   - `GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING`
   - `GCP_SERVICE_ACCOUNT_STAGING`

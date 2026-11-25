@@ -1,12 +1,19 @@
 name: Android Fastlane with Firebase App Distribution Workflow
 
 on:
-  push:
-    branches:
-      - main
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Release notes for production testers'
+        required: false
+        default: 'Production Distribution via Fastlane'
+
+permissions:
+  contents: read
 
 jobs:
   distribute_to_firebase:
+    name: Distribute Production to Firebase App Distribution
     runs-on: ubuntu-latest
 
     steps:
@@ -37,7 +44,7 @@ jobs:
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
         with:
-          ruby-version: '3.2.3'
+          ruby-version: '3.2.11'
           bundler-cache: true
           working-directory: android
 
