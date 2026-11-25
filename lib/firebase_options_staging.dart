@@ -2,17 +2,17 @@
 // Target Firebase Project: study-buddy-54266 (Project Number: 194789753908)
 // ignore_for_file: type=lint
 import 'package:firebase_core/firebase_core.dart' show FirebaseOptions;
-import 'package:meta/meta.dart';
 import 'firebase_options_staging.generated.dart' as generated;
 
 /// Exception thrown when the Staging environment is executed prior to real
-/// Firebase App registration in study-buddy-54266.
+/// Firebase App registration and authoritative storage bucket verification in study-buddy-54266.
 class UnconfiguredStagingEnvironmentException implements Exception {
   final String message;
   const UnconfiguredStagingEnvironmentException([
     this.message =
         'ChatUp Staging environment is pending live Firebase App registration in project study-buddy-54266 (Project Number: 194789753908). '
-        'Real Firebase configuration options must be generated via FlutterFire CLI once the authorized IAM account completes app registration.',
+        'Real Firebase configuration options must be generated via FlutterFire CLI once the authorized IAM account completes app registration, '
+        'and the authoritative Staging Storage Bucket must be verified.',
   ]);
 
   @override
@@ -170,59 +170,30 @@ StagingConfigurationValidation validateStagingOptions({
 ///
 /// Ensures fail-closed execution in unconfigured mode and delegates to genuine
 /// generated options only when configuration is complete and verified.
+///
+/// Contains NO runtime candidate-injection mechanism, setters, or test bypasses.
 class DefaultFirebaseOptionsStaging {
   static const String expectedProjectId = 'study-buddy-54266';
   static const String expectedProjectNumber = '194789753908';
 
-  /// Authoritative Staging Storage Bucket.
+  /// Immutable authoritative Staging Storage Bucket.
   /// Must be sourced from authorized Firebase project configuration after IAM access is restored.
   /// Remains null until IAM permissions are provisioned, ensuring fail-closed runtime validation.
   static const String? authoritativeStorageBucket = null;
 
-  // Candidate injection for testing (no bypass!)
-  static FirebaseOptions? _candidateAndroid;
-  static FirebaseOptions? _candidateIos;
-  static FirebaseOptions? _candidateCurrentPlatform;
-  static String? _candidateExpectedStorageBucket;
-
-  /// Internal / test setter to inject candidate options.
-  /// CRITICAL: Injected candidate options undergo the exact same [validateStagingOptions]
-  /// check as generated options. There is NO boolean bypass flag.
-  @visibleForTesting
-  static void setMockConfiguredOptions({
-    FirebaseOptions? currentPlatform,
-    required FirebaseOptions android,
-    required FirebaseOptions ios,
-    String? expectedStorageBucket,
-  }) {
-    _candidateCurrentPlatform = currentPlatform;
-    _candidateAndroid = android;
-    _candidateIos = ios;
-    _candidateExpectedStorageBucket = expectedStorageBucket;
-  }
-
-  /// Reset to unconfigured state
-  @visibleForTesting
-  static void resetToUnconfigured() {
-    _candidateCurrentPlatform = null;
-    _candidateAndroid = null;
-    _candidateIos = null;
-    _candidateExpectedStorageBucket = null;
-  }
-
   /// Evaluates configuration validity via [validateStagingOptions].
+  /// Derives options exclusively from [generated.DefaultFirebaseOptions] and [authoritativeStorageBucket].
   static StagingConfigurationValidation get validation {
+    if (authoritativeStorageBucket == null) {
+      return const StagingConfigurationValidation.invalid(
+        'Authoritative Staging Storage Bucket is null. Staging remains unconfigured until IAM access is restored and the authoritative bucket is configured.',
+      );
+    }
     try {
-      final androidOptions =
-          _candidateAndroid ?? generated.DefaultFirebaseOptions.android;
-      final iosOptions = _candidateIos ?? generated.DefaultFirebaseOptions.ios;
-      final bucket =
-          _candidateExpectedStorageBucket ?? authoritativeStorageBucket;
-
       return validateStagingOptions(
-        android: androidOptions,
-        ios: iosOptions,
-        expectedStorageBucket: bucket,
+        android: generated.DefaultFirebaseOptions.android,
+        ios: generated.DefaultFirebaseOptions.ios,
+        expectedStorageBucket: authoritativeStorageBucket,
       );
     } catch (e) {
       return StagingConfigurationValidation.invalid(
@@ -232,28 +203,28 @@ class DefaultFirebaseOptionsStaging {
   }
 
   /// Whether Staging options have been properly configured and validated.
-  /// Strictly delegates to [validation.isValid] with no bypass.
-  static bool get isConfigured => validation.isValid;
+  /// Derived exclusively from immutable authoritative configuration.
+  static bool get isConfigured =>
+      authoritativeStorageBucket != null && validation.isValid;
 
   static FirebaseOptions get currentPlatform {
     if (!isConfigured) {
       throw const UnconfiguredStagingEnvironmentException();
     }
-    return _candidateCurrentPlatform ??
-        generated.DefaultFirebaseOptions.currentPlatform;
+    return generated.DefaultFirebaseOptions.currentPlatform;
   }
 
   static FirebaseOptions get android {
     if (!isConfigured) {
       throw const UnconfiguredStagingEnvironmentException();
     }
-    return _candidateAndroid ?? generated.DefaultFirebaseOptions.android;
+    return generated.DefaultFirebaseOptions.android;
   }
 
   static FirebaseOptions get ios {
     if (!isConfigured) {
       throw const UnconfiguredStagingEnvironmentException();
     }
-    return _candidateIos ?? generated.DefaultFirebaseOptions.ios;
+    return generated.DefaultFirebaseOptions.ios;
   }
 }

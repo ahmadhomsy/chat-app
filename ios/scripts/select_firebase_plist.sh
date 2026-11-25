@@ -145,12 +145,26 @@ validate_plist_identity() {
                 ;;
         esac
 
-        # Storage bucket validation
-        if [ -n "$EXPECTED_STAGING_STORAGE_BUCKET" ]; then
-            if [ "$_bucket" != "$EXPECTED_STAGING_STORAGE_BUCKET" ]; then
-                echo "error: Staging plist validation failed: STORAGE_BUCKET '$_bucket' != '$EXPECTED_STAGING_STORAGE_BUCKET'" >&2
-                exit 1
-            fi
+        # Mandatory Staging Storage Bucket validation
+        if [ -z "$EXPECTED_STAGING_STORAGE_BUCKET" ] || [ -z "$(printf "%s" "$EXPECTED_STAGING_STORAGE_BUCKET" | tr -d ' ')" ]; then
+            echo "error: Staging plist validation failed: EXPECTED_STAGING_STORAGE_BUCKET is required but missing or empty." >&2
+            exit 1
+        fi
+
+        if [ "$EXPECTED_STAGING_STORAGE_BUCKET" = "chat-app-28ac0.firebasestorage.app" ] || \
+           [ "$EXPECTED_STAGING_STORAGE_BUCKET" = "chat-app-28ac0.appspot.com" ]; then
+            echo "error: Staging plist validation failed: EXPECTED_STAGING_STORAGE_BUCKET cannot be a Production bucket!" >&2
+            exit 1
+        fi
+
+        if [ -z "$_bucket" ] || [ -z "$(printf "%s" "$_bucket" | tr -d ' ')" ]; then
+            echo "error: Staging plist validation failed: STORAGE_BUCKET in plist is missing or empty." >&2
+            exit 1
+        fi
+
+        if [ "$_bucket" != "$EXPECTED_STAGING_STORAGE_BUCKET" ]; then
+            echo "error: Staging plist validation failed: STORAGE_BUCKET '$_bucket' does not match authoritative expected bucket '$EXPECTED_STAGING_STORAGE_BUCKET'" >&2
+            exit 1
         fi
 
         # Absolute Production Isolation: Never allow Production values in Staging plist

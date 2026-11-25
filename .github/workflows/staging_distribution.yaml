@@ -41,6 +41,7 @@ jobs:
           STAGING_TESTERS: ${{ secrets.STAGING_TESTERS }}
           STAGING_GOOGLE_JSON: ${{ secrets.STAGING_GOOGLE_SERVICES_JSON_BASE64 }}
           STAGING_FIREBASE_OPTIONS: ${{ secrets.STAGING_FIREBASE_OPTIONS_BASE64 }}
+          STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
         run: |
           echo "Running preflight checks for required staging secrets..."
           MISSING=0
@@ -60,6 +61,7 @@ jobs:
           check_secret "STAGING_TESTERS" "$STAGING_TESTERS"
           check_secret "STAGING_GOOGLE_SERVICES_JSON_BASE64" "$STAGING_GOOGLE_JSON"
           check_secret "STAGING_FIREBASE_OPTIONS_BASE64" "$STAGING_FIREBASE_OPTIONS"
+          check_secret "STAGING_STORAGE_BUCKET" "$STAGING_STORAGE_BUCKET"
           if [ "$MISSING" -ne 0 ]; then
             echo "Preflight check failed: One or more required staging secrets are missing."
             exit 1
@@ -78,6 +80,7 @@ jobs:
       - name: Decode and Validate Staging google-services.json
         env:
           STAGING_GOOGLE_JSON: ${{ secrets.STAGING_GOOGLE_SERVICES_JSON_BASE64 }}
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
         run: |
           mkdir -p android/app/src/staging
           echo "$STAGING_GOOGLE_JSON" | base64 --decode > android/app/src/staging/google-services.json
@@ -86,9 +89,16 @@ jobs:
       - name: Decode and Validate Staging firebase_options_staging.generated.dart
         env:
           STAGING_FIREBASE_OPTIONS: ${{ secrets.STAGING_FIREBASE_OPTIONS_BASE64 }}
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
         run: |
           echo "$STAGING_FIREBASE_OPTIONS" | base64 --decode > lib/firebase_options_staging.generated.dart
           flutter test tool/validate_staging_options.dart
+
+      - name: Validate Staging Cross-File Storage Bucket Consistency
+        env:
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          node tool/validate_staging_cross_file_consistency.js
 
       - name: Setup Ruby
         uses: ruby/setup-ruby@v1
@@ -103,5 +113,6 @@ jobs:
           STAGING_FIREBASE_APP_ID: ${{ secrets.STAGING_FIREBASE_APP_ID }}
           STAGING_TESTERS: ${{ secrets.STAGING_TESTERS }}
           STAGING_RELEASE_NOTES: ${{ github.event.inputs.release_notes || 'ChatUp Staging Build' }}
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
         run: |
           bundle exec fastlane android firebase_distribution_staging

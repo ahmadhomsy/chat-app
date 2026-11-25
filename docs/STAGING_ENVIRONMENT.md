@@ -96,16 +96,56 @@ The Google Services Gradle plugin resolves `google-services.json` per flavor:
 - Automated Build Phase Run Script in Xcode (`Runner.xcodeproj/project.pbxproj` invoking `ios/scripts/select_firebase_plist.sh`):
   Deterministic POSIX shell script selecting the appropriate flavor plist based on `$FLUTTER_FLAVOR` or `$CONFIGURATION` and failing closed (`exit 1`) if the configuration is unknown, if the flavor is unsupported (e.g. `development`), or if the requested plist does not exist or fails identity validation (verifies `PROJECT_ID`, `GCM_SENDER_ID`, `BUNDLE_ID`, `GOOGLE_APP_ID`, and `STORAGE_BUCKET`). Staging never falls back to Production.
 
-### Generating Staging Firebase Configuration (Once IAM is Authorized)
-When cloud IAM access to project `study-buddy-54266` is granted:
-```bash
-flutterfire configure \
-  --project=study-buddy-54266 \
-  --out=lib/firebase_options_staging.generated.dart \
-  --android-package-name=com.example.chat_app.staging \
-  --ios-bundle-id=com.example.chatApp.staging
-```
-The wrapper `lib/firebase_options_staging.dart` automatically validates and exposes the generated options via `DefaultFirebaseOptionsStaging`.
+### Post-IAM Provisioning Procedure & Activation Runbook
+Because Firebase IAM access to `study-buddy-54266` currently returns `403 PERMISSION_DENIED`, Staging is intentionally held in a **fail-closed** unconfigured state (`DefaultFirebaseOptionsStaging.authoritativeStorageBucket = null`). Running `flutterfire configure` alone is **not sufficient** to enable Staging while `authoritativeStorageBucket` is null.
+
+Once an authorized administrator grants `roles/firebase.admin` on project `study-buddy-54266`, execute the following sequential runbook:
+
+1. **Register Applications in Firebase Project:**
+   Register the respective client applications in Firebase project `study-buddy-54266`:
+   - Android: `com.example.chat_app.staging`
+   - iOS: `com.example.chatApp.staging`
+
+2. **Obtain Authoritative Storage Bucket:**
+   Retrieve the genuine Storage Bucket from the Firebase Console or GCP CLI:
+   ```bash
+   firebase storage:buckets:list --project study-buddy-54266
+   ```
+   Do not guess the bucket name from the project ID.
+
+3. **Generate Staging FlutterFire Options:**
+   Generate the raw FlutterFire configuration stub:
+   ```bash
+   flutterfire configure \
+     --project=study-buddy-54266 \
+     --out=lib/firebase_options_staging.generated.dart \
+     --android-package-name=com.example.chat_app.staging \
+     --ios-bundle-id=com.example.chatApp.staging
+   ```
+
+4. **Update Authoritative Storage Bucket in Runtime Wrapper:**
+   In `lib/firebase_options_staging.dart`, update the immutable constant:
+   ```dart
+   static const String? authoritativeStorageBucket = '<VERIFIED_STAGING_STORAGE_BUCKET>';
+   ```
+   This single trusted constant allows `isConfigured` to evaluate to `true` after verifying the generated options via `validateStagingOptions`.
+
+5. **Supply Matching GitHub Environment Secret:**
+   In GitHub repository settings under Environment `staging`, configure secret:
+   - `STAGING_STORAGE_BUCKET`: `<VERIFIED_STAGING_STORAGE_BUCKET>`
+   Also supply:
+   - `STAGING_GOOGLE_SERVICES_JSON_BASE64`
+   - `STAGING_FIREBASE_OPTIONS_BASE64`
+   - `STAGING_FIREBASE_APP_ID`
+
+6. **Validate Cross-File Consistency:**
+   Run the preflight consistency check across all staging configuration files:
+   ```bash
+   EXPECTED_STAGING_STORAGE_BUCKET="<VERIFIED_STAGING_STORAGE_BUCKET>" node tool/validate_staging_cross_file_consistency.js
+   ```
+
+7. **Execute Staging Build and Distribution:**
+   Trigger `.github/workflows/staging_distribution.yaml` manually via GitHub Actions `workflow_dispatch` only after all prior verification steps pass cleanly.
 
 ---
 
@@ -140,4 +180,5 @@ If emulator connection fails, startup **fails closed** throwing a `StateError` t
   - `STAGING_GOOGLE_SERVICES_JSON_BASE64`
   - `STAGING_FIREBASE_OPTIONS_BASE64`
   - `STAGING_FIREBASE_APP_ID`
+  - `STAGING_STORAGE_BUCKET`
   - `STAGING_TESTERS`

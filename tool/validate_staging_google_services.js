@@ -4,6 +4,17 @@ function validateGoogleServices(filePath, expectedStorageBucket) {
   if (!fs.existsSync(filePath)) {
     throw new Error(`File not found: ${filePath}`);
   }
+
+  // Mandatory authoritative expectedStorageBucket check
+  if (!expectedStorageBucket || typeof expectedStorageBucket !== 'string' || expectedStorageBucket.trim() === '') {
+    throw new Error('Mandatory expectedStorageBucket is missing or empty. Staging validation requires an authoritative expected storage bucket.');
+  }
+
+  const cleanExpectedBucket = expectedStorageBucket.trim();
+  if (cleanExpectedBucket === 'chat-app-28ac0.firebasestorage.app' || cleanExpectedBucket === 'chat-app-28ac0.appspot.com') {
+    throw new Error(`Authoritative expectedStorageBucket cannot match Production bucket "${cleanExpectedBucket}"`);
+  }
+
   const raw = fs.readFileSync(filePath, 'utf8');
   const json = JSON.parse(raw);
 
@@ -22,8 +33,8 @@ function validateGoogleServices(filePath, expectedStorageBucket) {
   if (bucket === 'chat-app-28ac0.firebasestorage.app' || bucket === 'chat-app-28ac0.appspot.com') {
     throw new Error(`Production storage bucket detected in Staging google-services.json: "${bucket}"`);
   }
-  if (expectedStorageBucket && bucket !== expectedStorageBucket) {
-    throw new Error(`storage_bucket "${bucket}" does not match authoritative expected bucket "${expectedStorageBucket}"`);
+  if (bucket !== cleanExpectedBucket) {
+    throw new Error(`storage_bucket "${bucket}" does not match authoritative expected bucket "${cleanExpectedBucket}"`);
   }
 
   const clients = json.client || [];

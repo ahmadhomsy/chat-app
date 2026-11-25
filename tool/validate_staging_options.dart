@@ -1,11 +1,40 @@
+import 'dart:io' show Platform;
 import 'package:chat_app/firebase_options_staging.dart';
 import 'package:chat_app/firebase_options_staging.generated.dart' as generated;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   test(
-    'Deterministic Staging FirebaseOptions Identity & Production Isolation Verification',
+    'Deterministic Staging FirebaseOptions Identity & Independent Bucket Verification',
     () {
+      // Sourced independently from environment, never from android.storageBucket itself
+      const dartDefineBucket = String.fromEnvironment(
+        'EXPECTED_STAGING_STORAGE_BUCKET',
+      );
+      final envBucket = Platform.environment['EXPECTED_STAGING_STORAGE_BUCKET'];
+      final expectedBucket = dartDefineBucket.isNotEmpty
+          ? dartDefineBucket
+          : (envBucket ?? '');
+
+      expect(
+        expectedBucket.trim().isNotEmpty,
+        isTrue,
+        reason:
+            'Mandatory expected Staging storage bucket is missing or empty. '
+            'Pass EXPECTED_STAGING_STORAGE_BUCKET via environment variable or --dart-define.',
+      );
+
+      expect(
+        expectedBucket,
+        isNot(equals('chat-app-28ac0.firebasestorage.app')),
+        reason: 'Authoritative Staging bucket cannot be Production bucket',
+      );
+      expect(
+        expectedBucket,
+        isNot(equals('chat-app-28ac0.appspot.com')),
+        reason: 'Authoritative Staging bucket cannot be Production bucket',
+      );
+
       final android = generated.DefaultFirebaseOptions.android;
       final ios = generated.DefaultFirebaseOptions.ios;
 
@@ -58,7 +87,7 @@ void main() {
         reason: 'ios.iosBundleId must be com.example.chatApp.staging',
       );
 
-      // 6. Storage Bucket Identity Checks
+      // 6. Independent Storage Bucket Identity Checks: verify options equal expected bucket
       expect(
         android.storageBucket,
         isNotNull,
@@ -70,6 +99,13 @@ void main() {
         reason: 'android.storageBucket cannot be empty',
       );
       expect(
+        android.storageBucket,
+        equals(expectedBucket),
+        reason:
+            'android.storageBucket must match independently supplied expected bucket',
+      );
+
+      expect(
         ios.storageBucket,
         isNotNull,
         reason: 'ios.storageBucket cannot be null',
@@ -79,6 +115,14 @@ void main() {
         isTrue,
         reason: 'ios.storageBucket cannot be empty',
       );
+      expect(
+        ios.storageBucket,
+        equals(expectedBucket),
+        reason:
+            'ios.storageBucket must match independently supplied expected bucket',
+      );
+
+      // Android and iOS buckets must strictly match each other
       expect(
         android.storageBucket,
         equals(ios.storageBucket),
@@ -115,11 +159,11 @@ void main() {
       expect(ios.apiKey.isNotEmpty, isTrue);
       expect(ios.apiKey, isNot(contains('PLACEHOLDER')));
 
-      // 9. Pure validateStagingOptions must validate options cleanly
+      // 9. Pure validateStagingOptions must validate options cleanly with expected bucket
       final valRes = validateStagingOptions(
         android: android,
         ios: ios,
-        expectedStorageBucket: android.storageBucket,
+        expectedStorageBucket: expectedBucket,
       );
       expect(valRes.isValid, isTrue, reason: valRes.errorMessage);
     },

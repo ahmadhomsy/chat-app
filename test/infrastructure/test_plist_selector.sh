@@ -4,7 +4,7 @@ set -e
 # ChatUp iOS Firebase Plist Selector & Identity Validation Test Suite
 # Tests ios/scripts/select_firebase_plist.sh under standard POSIX /bin/sh.
 # Asserts strict flavor enforcement, Xcode configuration inference, plist identity validation,
-# and zero cross-environment fallback.
+# mandatory authoritative storage bucket checks, and zero cross-environment fallback.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
@@ -25,14 +25,17 @@ mkdir -p "$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app"
 mkdir -p "$PROJECT_DIR/Runner/Firebase/Production"
 mkdir -p "$PROJECT_DIR/Runner/Firebase/Staging"
 
-# Helpers to write valid mock plist fixtures (without real credentials)
+# Synthetic test fixture bucket
+TEST_FIXTURE_STAGING_BUCKET="study-buddy-54266.firebasestorage.app"
+
+# Helpers to write mock plist fixtures (without real credentials)
 write_staging_plist() {
     _path="$1"
     _proj_id="${2:-study-buddy-54266}"
     _sender_id="${3:-194789753908}"
     _bundle_id="${4:-com.example.chatApp.staging}"
     _app_id="${5:-1:194789753908:ios:mockstagingappid123}"
-    _bucket="${6:-study-buddy-54266.firebasestorage.app}"
+    _bucket="${6:-$TEST_FIXTURE_STAGING_BUCKET}"
     _api_key="${7:-AIzaSy_MOCK_STAGING_API_KEY_VALID_123}"
 
     cat <<EOF > "$_path"
@@ -54,6 +57,14 @@ write_staging_plist() {
 	<string>$_api_key</string>
 </dict>
 </plist>
+EOF
+}
+
+write_staging_plist_raw() {
+    _path="$1"
+    _content="$2"
+    cat <<EOF > "$_path"
+$_content
 EOF
 }
 
@@ -96,10 +107,32 @@ setup_standard_fixtures() {
 run_test_selector() {
     _flavor="$1"
     _config="$2"
+    if [ $# -ge 3 ]; then
+        _expected_bucket="$3"
+    else
+        _expected_bucket="$TEST_FIXTURE_STAGING_BUCKET"
+    fi
     _dest="$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist"
     rm -f "$_dest"
 
     env FLUTTER_FLAVOR="$_flavor" \
+        CONFIGURATION="$_config" \
+        EXPECTED_STAGING_STORAGE_BUCKET="$_expected_bucket" \
+        PROJECT_DIR="$PROJECT_DIR" \
+        BUILT_PRODUCTS_DIR="$BUILT_PRODUCTS_DIR" \
+        PRODUCT_NAME="$PRODUCT_NAME" \
+        PLIST_DEST="$_dest" \
+        sh "$SELECTOR_SCRIPT"
+}
+
+run_test_selector_no_bucket() {
+    _flavor="$1"
+    _config="$2"
+    _dest="$BUILT_PRODUCTS_DIR/${PRODUCT_NAME}.app/GoogleService-Info.plist"
+    rm -f "$_dest"
+
+    env -u EXPECTED_STAGING_STORAGE_BUCKET \
+        FLUTTER_FLAVOR="$_flavor" \
         CONFIGURATION="$_config" \
         PROJECT_DIR="$PROJECT_DIR" \
         BUILT_PRODUCTS_DIR="$BUILT_PRODUCTS_DIR" \
@@ -231,7 +264,7 @@ echo "  [PASS] 15. Plist with mismatched Bundle ID fails validation"
 
 # 16. Plist with placeholder API key fails validation
 setup_standard_fixtures
-write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.chatApp.staging" "1:194789753908:ios:app123" "study-buddy-54266.firebasestorage.app" "STAGING_IOS_API_KEY_PLACEHOLDER"
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.chatApp.staging" "1:194789753908:ios:app123" "$TEST_FIXTURE_STAGING_BUCKET" "STAGING_IOS_API_KEY_PLACEHOLDER"
 if run_test_selector "" "Debug-staging" 2>/dev/null; then
     echo "FAIL: Test 16 expected error on placeholder API key" >&2
     exit 1
@@ -247,4 +280,68 @@ if run_test_selector "" "Debug-staging" 2>/dev/null; then
 fi
 echo "  [PASS] 17. Plist with Production storage bucket in Staging fails validation"
 
-echo "All 17 Plist Selector & Identity Validation Tests PASSED!"
+# 18. Mandatory Storage Bucket: Missing EXPECTED_STAGING_STORAGE_BUCKET fails
+setup_standard_fixtures
+if run_test_selector_no_bucket "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 18 expected error when EXPECTED_STAGING_STORAGE_BUCKET is unset" >&2
+    exit 1
+fi
+echo "  [PASS] 18. Missing EXPECTED_STAGING_STORAGE_BUCKET fails"
+
+# 19. Mandatory Storage Bucket: Empty EXPECTED_STAGING_STORAGE_BUCKET fails
+setup_standard_fixtures
+if run_test_selector "" "Debug-staging" "" 2>/dev/null; then
+    echo "FAIL: Test 19 expected error when EXPECTED_STAGING_STORAGE_BUCKET is empty" >&2
+    exit 1
+fi
+echo "  [PASS] 19. Empty EXPECTED_STAGING_STORAGE_BUCKET fails"
+
+# 20. Mandatory Storage Bucket: Missing plist STORAGE_BUCKET key fails
+setup_standard_fixtures
+write_staging_plist_raw "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" '<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PROJECT_ID</key>
+	<string>study-buddy-54266</string>
+	<key>GCM_SENDER_ID</key>
+	<string>194789753908</string>
+	<key>BUNDLE_ID</key>
+	<string>com.example.chatApp.staging</string>
+	<key>GOOGLE_APP_ID</key>
+	<string>1:194789753908:ios:app123</string>
+	<key>API_KEY</key>
+	<string>valid-key-123</string>
+</dict>
+</plist>'
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 20 expected error on missing plist STORAGE_BUCKET" >&2
+    exit 1
+fi
+echo "  [PASS] 20. Missing plist STORAGE_BUCKET fails"
+
+# 21. Mandatory Storage Bucket: Empty plist STORAGE_BUCKET value fails
+setup_standard_fixtures
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.chatApp.staging" "1:194789753908:ios:app123" "   " "valid-key-123"
+if run_test_selector "" "Debug-staging" 2>/dev/null; then
+    echo "FAIL: Test 21 expected error on empty plist STORAGE_BUCKET" >&2
+    exit 1
+fi
+echo "  [PASS] 21. Empty plist STORAGE_BUCKET fails"
+
+# 22. Mandatory Storage Bucket: Non-production but incorrect bucket fails
+setup_standard_fixtures
+write_staging_plist "$PROJECT_DIR/Runner/Firebase/Staging/GoogleService-Info.plist" "study-buddy-54266" "194789753908" "com.example.chatApp.staging" "1:194789753908:ios:app123" "wrong-bucket.firebasestorage.app" "valid-key-123"
+if run_test_selector "" "Debug-staging" "$TEST_FIXTURE_STAGING_BUCKET" 2>/dev/null; then
+    echo "FAIL: Test 22 expected error on mismatched storage bucket" >&2
+    exit 1
+fi
+echo "  [PASS] 22. Non-production but incorrect bucket fails"
+
+# 23. Mandatory Storage Bucket: Matching explicitly supplied expected bucket succeeds
+setup_standard_fixtures
+run_test_selector "" "Debug-staging" "$TEST_FIXTURE_STAGING_BUCKET"
+assert_destination_contains "$TEST_FIXTURE_STAGING_BUCKET"
+echo "  [PASS] 23. Matching explicitly supplied expected bucket succeeds"
+
+echo "All 23 Plist Selector & Identity Validation Tests PASSED!"
