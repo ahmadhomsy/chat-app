@@ -103,3 +103,23 @@ jobs:
       - name: Run Firebase Security Rules against Live Emulators
         working-directory: ./functions
         run: firebase emulators:exec --project chat-app-28ac0 --only "firestore,storage,database" "npm run test:rules"
+
+  ruby_toolchain_smoke_test:
+    name: Ruby 3.2.11 & Fastlane Compatibility Smoke Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby 3.2.11
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2.11'
+          bundler-cache: true
+          working-directory: android
+
+      - name: Verify Fastlane CLI version and Bundler dependencies
+        working-directory: android
+        run: bundle exec fastlane --version
