@@ -1,17 +1,50 @@
 default_platform(:android)
 
+require_relative 'staging_distribution_guard'
+
 platform :android do
   desc "Lane For Android Firebase App Distribution"
   lane :firebase_distribution do
     sh "flutter clean"
     sh "flutter build apk --release --flavor production --target lib/main_production.dart --no-tree-shake-icons"
     firebase_app_distribution(
-    app: "1:639830188590:android:4a3b1c669d60ee593235bf",
-    firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"],
-    android_artifact_type: "APK",
-    android_artifact_path: "../build/app/outputs/apk/production/release/app-production-release.apk",
-    testers: "2004ahmadhomsy@gmail.com",
-    release_notes: "First Fastlane Firebase Distribution",
-    upload_timeout: 900
-  )  end
+      app: "1:639830188590:android:4a3b1c669d60ee593235bf",
+      firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"],
+      android_artifact_type: "APK",
+      android_artifact_path: "../build/app/outputs/apk/production/release/app-production-release.apk",
+      testers: "2004ahmadhomsy@gmail.com",
+      release_notes: "First Fastlane Firebase Distribution",
+      upload_timeout: 900
+    )
+  end
+
+  desc "Lane For Android Firebase App Distribution (Staging)"
+  lane :firebase_distribution_staging do
+    staging_app_id = ENV["STAGING_FIREBASE_APP_ID"]
+    service_creds = ENV["GOOGLE_APPLICATION_CREDENTIALS"]
+    testers = ENV["STAGING_TESTERS"]
+    expected_bucket = ENV["EXPECTED_STAGING_STORAGE_BUCKET"] || ENV["STAGING_STORAGE_BUCKET"]
+
+    # Execute authoritative Storage Bucket and configuration guard BEFORE anything else
+    repo_root = File.expand_path('../..', __dir__)
+    StagingDistributionGuard.validate!(
+      repo_root: repo_root,
+      expected_bucket: expected_bucket,
+      staging_app_id: staging_app_id,
+      service_creds: service_creds,
+      testers: testers
+    )
+
+    sh "flutter clean"
+    sh "flutter build apk --release --flavor staging --target lib/main_staging.dart --no-tree-shake-icons"
+    firebase_app_distribution(
+      app: staging_app_id,
+      service_credentials_file: service_creds,
+      android_artifact_type: "APK",
+      android_artifact_path: "../build/app/outputs/apk/staging/release/app-staging-release.apk",
+      testers: testers,
+      release_notes: ENV["STAGING_RELEASE_NOTES"] || "ChatUp Staging Build",
+      upload_timeout: 900
+    )
+  end
 end

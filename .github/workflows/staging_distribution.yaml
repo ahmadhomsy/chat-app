@@ -1,0 +1,124 @@
+name: Staging Android Fastlane with Firebase App Distribution
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_notes:
+        description: 'Release notes for staging testers'
+        required: false
+        default: 'Manual Staging Distribution'
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  distribute_staging_to_firebase:
+    name: Distribute Staging to Firebase App Distribution
+    runs-on: ubuntu-latest
+    environment: staging
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Validate Staging Environment Secrets Preflight
+        env:
+          WIF_PROVIDER: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          WIF_SA: ${{ secrets.GCP_SERVICE_ACCOUNT_STAGING }}
+          STAGING_APP_ID: ${{ secrets.STAGING_FIREBASE_APP_ID }}
+          STAGING_TESTERS: ${{ secrets.STAGING_TESTERS }}
+          STAGING_GOOGLE_JSON: ${{ secrets.STAGING_GOOGLE_SERVICES_JSON_BASE64 }}
+          STAGING_FIREBASE_OPTIONS: ${{ secrets.STAGING_FIREBASE_OPTIONS_BASE64 }}
+          STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          echo "Running preflight checks for required staging secrets..."
+          MISSING=0
+          check_secret() {
+            NAME="$1"
+            VAL="$2"
+            if [ -z "$VAL" ]; then
+              echo "::error::Required secret $NAME is missing or empty"
+              MISSING=1
+            else
+              echo "Verified presence of secret $NAME"
+            fi
+          }
+          check_secret "GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING" "$WIF_PROVIDER"
+          check_secret "GCP_SERVICE_ACCOUNT_STAGING" "$WIF_SA"
+          check_secret "STAGING_FIREBASE_APP_ID" "$STAGING_APP_ID"
+          check_secret "STAGING_TESTERS" "$STAGING_TESTERS"
+          check_secret "STAGING_GOOGLE_SERVICES_JSON_BASE64" "$STAGING_GOOGLE_JSON"
+          check_secret "STAGING_FIREBASE_OPTIONS_BASE64" "$STAGING_FIREBASE_OPTIONS"
+          check_secret "STAGING_STORAGE_BUCKET" "$STAGING_STORAGE_BUCKET"
+          if [ "$MISSING" -ne 0 ]; then
+            echo "Preflight check failed: One or more required staging secrets are missing."
+            exit 1
+          fi
+          echo "All staging secrets verified successfully."
+
+      # Authenticate to GCP using Workload Identity Federation (OIDC) without long-lived keys or FIREBASE_TOKEN
+      - name: Authenticate to Google Cloud (Staging Workload Identity)
+        uses: google-github-actions/auth@v2
+        with:
+          project_id: 'study-buddy-54266'
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER_STAGING }}
+          service_account: ${{ secrets.GCP_SERVICE_ACCOUNT_STAGING }}
+          create_credentials_file: true
+
+      - name: Decode and Validate Staging google-services.json
+        env:
+          STAGING_GOOGLE_JSON: ${{ secrets.STAGING_GOOGLE_SERVICES_JSON_BASE64 }}
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          mkdir -p android/app/src/staging
+          echo "$STAGING_GOOGLE_JSON" | base64 --decode > android/app/src/staging/google-services.json
+          node tool/validate_staging_google_services.js android/app/src/staging/google-services.json
+
+      - name: Decode and Validate Staging firebase_options_staging.generated.dart
+        env:
+          STAGING_FIREBASE_OPTIONS: ${{ secrets.STAGING_FIREBASE_OPTIONS_BASE64 }}
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          echo "$STAGING_FIREBASE_OPTIONS" | base64 --decode > lib/firebase_options_staging.generated.dart
+          flutter test tool/validate_staging_options.dart
+
+      - name: Validate Staging Runtime Wrapper Authoritative Storage Bucket
+        env:
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          node tool/validate_staging_runtime_wrapper.js
+
+      - name: Validate Staging Cross-File Storage Bucket Consistency
+        env:
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          node tool/validate_staging_cross_file_consistency.js
+
+      - name: Setup Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.2.3'
+          bundler-cache: true
+          working-directory: android
+
+      - name: Build and distribute staging app with Fastlane
+        working-directory: android
+        env:
+          STAGING_FIREBASE_APP_ID: ${{ secrets.STAGING_FIREBASE_APP_ID }}
+          STAGING_TESTERS: ${{ secrets.STAGING_TESTERS }}
+          STAGING_RELEASE_NOTES: ${{ github.event.inputs.release_notes || 'ChatUp Staging Build' }}
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          bundle exec fastlane android firebase_distribution_staging

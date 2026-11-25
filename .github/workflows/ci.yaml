@@ -90,6 +90,16 @@ jobs:
         working-directory: ./functions
         run: npm test
 
+      - name: Run Staging Secret Contract & Identity Tests
+        working-directory: ./functions
+        run: npm run test:staging:contract
+
+      - name: Run Fastlane Staging Distribution Guard Ruby Tests
+        run: ruby test/infrastructure/test_staging_distribution_guard.rb
+
+      - name: Run iOS Firebase Plist Selector POSIX Portability Tests
+        run: sh test/infrastructure/test_plist_selector.sh
+
       - name: Run Firebase Security Rules against Live Emulators
         working-directory: ./functions
-        run: firebase emulators:exec --only "firestore,storage,database" "npm run test:rules"
+        run: firebase emulators:exec --project chat-app-28ac0 --only "firestore,storage,database" "npm run test:rules"
