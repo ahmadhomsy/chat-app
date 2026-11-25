@@ -1,7 +1,9 @@
 {
   "projects": {
+    "default": "demo-chatup",
+    "development": "demo-chatup",
+    "demo": "demo-chatup",
     "production": "chat-app-28ac0",
     "staging": "study-buddy-54266"
   }
 }
-

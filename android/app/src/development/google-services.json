@@ -1,0 +1,25 @@
+{
+  "project_info": {
+    "project_number": "100000000000",
+    "project_id": "demo-chatup",
+    "storage_bucket": "demo-chatup.appspot.com"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:100000000000:android:development000000000",
+        "android_client_info": {
+          "package_name": "com.example.chat_app.dev"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDemoChatUpLocalEmulatorDummyKey"
+        }
+      ],
+      "services": {}
+    }
+  ],
+  "configuration_version": "1"
+}
