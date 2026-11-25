@@ -2,8 +2,10 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { spawnSync } = require('child_process');
 const { validateGoogleServices } = require('../../tool/validate_staging_google_services');
 const { validateCrossFileConsistency } = require('../../tool/validate_staging_cross_file_consistency');
+const { validateRuntimeWrapper } = require('../../tool/validate_staging_runtime_wrapper');
 
 describe('Staging Secret Contract & Identity Verification Tests', () => {
   let tempDir;
@@ -29,18 +31,18 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
     project_info: {
       project_number: '194789753908',
       project_id: 'study-buddy-54266',
-      storage_bucket: TEST_SYNTHETIC_BUCKET
+      storage_bucket: TEST_SYNTHETIC_BUCKET,
     },
     client: [
       {
         client_info: {
           mobilesdk_app_id: '1:194789753908:android:a1b2c3d4e5f6',
           android_client_info: {
-            package_name: 'com.example.chat_app.staging'
-          }
-        }
-      }
-    ]
+            package_name: 'com.example.chat_app.staging',
+          },
+        },
+      },
+    ],
   };
 
   it('1. Correct Staging google-services.json is accepted with matching expected bucket', () => {
@@ -57,18 +59,18 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
       project_info: {
         project_number: '639830188590',
         project_id: 'chat-app-28ac0',
-        storage_bucket: 'chat-app-28ac0.firebasestorage.app'
+        storage_bucket: 'chat-app-28ac0.firebasestorage.app',
       },
       client: [
         {
           client_info: {
             mobilesdk_app_id: '1:639830188590:android:4a3b1c669d60ee593235bf',
             android_client_info: {
-              package_name: 'com.example.chat_app'
-            }
-          }
-        }
-      ]
+              package_name: 'com.example.chat_app',
+            },
+          },
+        },
+      ],
     };
     const fixturePath = writeFixture('prod.json', prodConfig);
     assert.throws(
@@ -119,7 +121,7 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
     const malformedPath = writeFixture('malformed.json', '{ invalid json ');
     assert.throws(
       () => validateGoogleServices(malformedPath, TEST_SYNTHETIC_BUCKET),
-      /Unexpected token|JSON/
+      /Unexpected token|JSON|Malformed/
     );
   });
 
@@ -188,59 +190,55 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
     assert.strictEqual(res.storageBucket, TEST_SYNTHETIC_BUCKET);
   });
 
-  describe('Fastlane App ID Guard Simulation Tests', () => {
-    function simulateFastlaneGuard(stagingAppId, googleServicesPath) {
-      if (!stagingAppId || stagingAppId.trim() === '') {
-        throw new Error('Missing required environment variable STAGING_FIREBASE_APP_ID');
-      }
-      if (!stagingAppId.startsWith('1:194789753908:android:')) {
-        throw new Error(`STAGING_FIREBASE_APP_ID '${stagingAppId}' is invalid: must begin with '1:194789753908:android:'`);
-      }
-      if (!fs.existsSync(googleServicesPath)) {
-        throw new Error(`Staging google-services.json not found at ${googleServicesPath}`);
-      }
-      const gsContent = JSON.parse(fs.readFileSync(googleServicesPath, 'utf8'));
-      const clients = gsContent.client || [];
-      const stagingClient = clients.find(c => c.client_info?.android_client_info?.package_name === 'com.example.chat_app.staging');
-      const gsAppId = stagingClient?.client_info?.mobilesdk_app_id;
-      if (!gsAppId) {
-        throw new Error('No matching client with package com.example.chat_app.staging found');
-      }
-      if (gsAppId !== stagingAppId) {
-        throw new Error(`STAGING_FIREBASE_APP_ID ('${stagingAppId}') does not match mobilesdk_app_id in google-services.json ('${gsAppId}')`);
-      }
-      return true;
+  describe('Runtime Wrapper Authoritative Storage Bucket Tests', () => {
+    function writeMockRuntimeWrapper(bucket) {
+      const bucketDecl = bucket === null ? 'null' : `'${bucket}'`;
+      return writeFixture('firebase_options_staging.dart', `
+class DefaultFirebaseOptionsStaging {
+  static const String expectedProjectId = 'study-buddy-54266';
+  static const String expectedProjectNumber = '194789753908';
+  static const String? authoritativeStorageBucket = ${bucketDecl};
+}
+`);
     }
 
-    it('15. Fastlane accepts matching Android App ID with google-services.json', () => {
-      const gsPath = writeFixture('valid-gs.json', validStagingConfig);
-      assert.strictEqual(
-        simulateFastlaneGuard('1:194789753908:android:a1b2c3d4e5f6', gsPath),
-        true
+    it('15. Runtime Wrapper with null bucket fails validation', () => {
+      const wrapperPath = writeMockRuntimeWrapper(null);
+      assert.throws(
+        () => validateRuntimeWrapper({ wrapperPath, expectedStorageBucket: TEST_SYNTHETIC_BUCKET }),
+        /authoritativeStorageBucket in Runtime Wrapper is null\. Staging remains unconfigured and cannot be distributed\./
       );
     });
 
-    it('16. Fastlane rejects iOS App ID for Android distribution', () => {
-      const gsPath = writeFixture('valid-gs.json', validStagingConfig);
+    it('16. Runtime Wrapper with empty or whitespace bucket fails validation', () => {
+      const wrapperPath = writeMockRuntimeWrapper('   ');
       assert.throws(
-        () => simulateFastlaneGuard('1:194789753908:ios:f6e5d4c3b2a1', gsPath),
-        /must begin with '1:194789753908:android:'/
+        () => validateRuntimeWrapper({ wrapperPath, expectedStorageBucket: TEST_SYNTHETIC_BUCKET }),
+        /authoritativeStorageBucket in Runtime Wrapper is empty or whitespace-only/
       );
     });
 
-    it('17. Fastlane rejects mismatched App ID between ENV and google-services.json', () => {
-      const gsPath = writeFixture('valid-gs.json', validStagingConfig);
+    it('17. Runtime Wrapper with Production bucket fails validation', () => {
+      const wrapperPath = writeMockRuntimeWrapper('chat-app-28ac0.firebasestorage.app');
       assert.throws(
-        () => simulateFastlaneGuard('1:194789753908:android:different_app_id_999', gsPath),
-        /does not match mobilesdk_app_id in google-services.json/
+        () => validateRuntimeWrapper({ wrapperPath, expectedStorageBucket: TEST_SYNTHETIC_BUCKET }),
+        /Production storage bucket detected in Runtime Wrapper/
       );
     });
 
-    it('18. Fastlane fails if Staging google-services.json is missing', () => {
+    it('18. Runtime Wrapper with mismatched bucket fails validation', () => {
+      const wrapperPath = writeMockRuntimeWrapper('different-bucket.firebasestorage.app');
       assert.throws(
-        () => simulateFastlaneGuard('1:194789753908:android:a1b2c3d4e5f6', '/nonexistent/path/google-services.json'),
-        /not found at/
+        () => validateRuntimeWrapper({ wrapperPath, expectedStorageBucket: TEST_SYNTHETIC_BUCKET }),
+        /does not match expected bucket/
       );
+    });
+
+    it('19. Runtime Wrapper with matching bucket succeeds', () => {
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
+      const res = validateRuntimeWrapper({ wrapperPath, expectedStorageBucket: TEST_SYNTHETIC_BUCKET });
+      assert.strictEqual(res.verifiedBucket, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.wrapperPath, wrapperPath);
     });
   });
 
@@ -250,6 +248,17 @@ describe('Staging Secret Contract & Identity Verification Tests', () => {
 class DefaultFirebaseOptions {
   static const android = FirebaseOptions(storageBucket: '${bucket}');
   static const ios = FirebaseOptions(storageBucket: '${bucket}');
+}
+`);
+    }
+
+    function writeMockRuntimeWrapper(bucket) {
+      const bucketDecl = bucket === null ? 'null' : `'${bucket}'`;
+      return writeFixture('firebase_options_staging.dart', `
+class DefaultFirebaseOptionsStaging {
+  static const String expectedProjectId = 'study-buddy-54266';
+  static const String expectedProjectNumber = '194789753908';
+  static const String? authoritativeStorageBucket = ${bucketDecl};
 }
 `);
     }
@@ -267,48 +276,127 @@ class DefaultFirebaseOptions {
 </plist>`);
     }
 
-    it('19. All files matching expected storage bucket passes cross-file validation', () => {
+    it('20. 2-target mode (Android + Dart) succeeds when no iOS plist is supplied', () => {
       const androidPath = writeFixture('android.json', validStagingConfig);
       const dartPath = writeMockDartOptions(TEST_SYNTHETIC_BUCKET);
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
+
+      const res = validateCrossFileConsistency({
+        androidPath,
+        dartPath,
+        wrapperPath,
+        expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
+      });
+
+      assert.strictEqual(res.verifiedBucket, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.targetCount, 2);
+      assert.strictEqual(res.mode, '2-target (Android + Dart)');
+      assert.strictEqual(res.verifiedSources.android, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.verifiedSources.dart_generated, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.verifiedSources.dart_wrapper, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.verifiedSources.ios, undefined);
+    });
+
+    it('21. 3-target mode (Android + Dart + iOS) succeeds when valid iOS plist is explicitly supplied', () => {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const dartPath = writeMockDartOptions(TEST_SYNTHETIC_BUCKET);
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
       const iosPath = writeMockIosPlist(TEST_SYNTHETIC_BUCKET);
 
       const res = validateCrossFileConsistency({
         androidPath,
         dartPath,
+        wrapperPath,
         iosPath,
         expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
       });
+
       assert.strictEqual(res.verifiedBucket, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.targetCount, 3);
+      assert.strictEqual(res.mode, '3-target (Android + Dart + iOS)');
       assert.strictEqual(res.verifiedSources.android, TEST_SYNTHETIC_BUCKET);
-      assert.strictEqual(res.verifiedSources.dart, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.verifiedSources.dart_generated, TEST_SYNTHETIC_BUCKET);
+      assert.strictEqual(res.verifiedSources.dart_wrapper, TEST_SYNTHETIC_BUCKET);
       assert.strictEqual(res.verifiedSources.ios, TEST_SYNTHETIC_BUCKET);
     });
 
-    it('20. Mismatch in Dart generated options fails cross-file validation', () => {
+    it('22. Missing iOS plist when explicitly supplied fails validation', () => {
       const androidPath = writeFixture('android.json', validStagingConfig);
-      const dartPath = writeMockDartOptions('different-bucket.firebasestorage.app');
-      const iosPath = writeMockIosPlist(TEST_SYNTHETIC_BUCKET);
+      const dartPath = writeMockDartOptions(TEST_SYNTHETIC_BUCKET);
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
+      const nonExistentIosPath = path.join(tempDir, 'nonexistent_ios.plist');
 
       assert.throws(
         () => validateCrossFileConsistency({
           androidPath,
           dartPath,
-          iosPath,
+          wrapperPath,
+          iosPath: nonExistentIosPath,
+          expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
+        }),
+        /Explicitly supplied iOS plist file not found/
+      );
+    });
+
+    it('23. Mismatch in Dart generated options fails cross-file validation', () => {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const dartPath = writeMockDartOptions('different-bucket.firebasestorage.app');
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
+
+      assert.throws(
+        () => validateCrossFileConsistency({
+          androidPath,
+          dartPath,
+          wrapperPath,
           expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
         }),
         /Cross-file storage bucket validation failed/
       );
     });
 
-    it('21. Mismatch in iOS plist fails cross-file validation', () => {
+    it('24. Null authoritative bucket in Runtime Wrapper fails cross-file validation', () => {
       const androidPath = writeFixture('android.json', validStagingConfig);
       const dartPath = writeMockDartOptions(TEST_SYNTHETIC_BUCKET);
+      const wrapperPath = writeMockRuntimeWrapper(null);
+
+      assert.throws(
+        () => validateCrossFileConsistency({
+          androidPath,
+          dartPath,
+          wrapperPath,
+          expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
+        }),
+        /authoritativeStorageBucket in Runtime Wrapper is null/
+      );
+    });
+
+    it('25. Mismatch in Runtime Wrapper fails cross-file validation', () => {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const dartPath = writeMockDartOptions(TEST_SYNTHETIC_BUCKET);
+      const wrapperPath = writeMockRuntimeWrapper('different-wrapper.firebasestorage.app');
+
+      assert.throws(
+        () => validateCrossFileConsistency({
+          androidPath,
+          dartPath,
+          wrapperPath,
+          expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
+        }),
+        /Cross-file storage bucket validation failed/
+      );
+    });
+
+    it('26. Mismatch in iOS plist fails cross-file validation', () => {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const dartPath = writeMockDartOptions(TEST_SYNTHETIC_BUCKET);
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
       const iosPath = writeMockIosPlist('different-bucket.firebasestorage.app');
 
       assert.throws(
         () => validateCrossFileConsistency({
           androidPath,
           dartPath,
+          wrapperPath,
           iosPath,
           expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
         }),
@@ -316,18 +404,147 @@ class DefaultFirebaseOptions {
       );
     });
 
-    it('22. Production bucket in any file fails cross-file validation', () => {
+    it('27. Production bucket in any file fails cross-file validation', () => {
       const androidPath = writeFixture('android.json', validStagingConfig);
       const dartPath = writeMockDartOptions('chat-app-28ac0.firebasestorage.app');
+      const wrapperPath = writeMockRuntimeWrapper(TEST_SYNTHETIC_BUCKET);
 
       assert.throws(
         () => validateCrossFileConsistency({
           androidPath,
           dartPath,
+          wrapperPath,
           expectedStorageBucket: TEST_SYNTHETIC_BUCKET,
         }),
         /Production storage bucket detected/
       );
+    });
+  });
+
+  describe('Actual Fastlane Staging Guard Ruby Execution Tests', () => {
+    function runRubyGuard(options = {}) {
+      const guardPath = path.resolve(__dirname, '../../android/fastlane/staging_distribution_guard.rb');
+      const repoRoot = path.resolve(__dirname, '../..');
+
+      const rubyCode = `
+        require_relative '${guardPath.replace(/\\/g, '/')}'
+        StagingDistributionGuard.validate!(
+          repo_root: '${repoRoot.replace(/\\/g, '/')}',
+          expected_bucket: ${options.expectedBucket ? `'${options.expectedBucket}'` : 'nil'},
+          staging_app_id: ${options.stagingAppId ? `'${options.stagingAppId}'` : 'nil'},
+          service_creds: ${options.serviceCreds ? `'${options.serviceCreds}'` : 'nil'},
+          testers: ${options.testers ? `'${options.testers}'` : 'nil'},
+          google_services_path: ${options.googleServicesPath ? `'${options.googleServicesPath.replace(/\\/g, '/')}'` : 'nil'},
+          dart_generated_path: ${options.dartGeneratedPath ? `'${options.dartGeneratedPath.replace(/\\/g, '/')}'` : 'nil'},
+          dart_wrapper_path: ${options.dartWrapperPath ? `'${options.dartWrapperPath.replace(/\\/g, '/')}'` : 'nil'}
+        )
+      `;
+
+      // Locate ruby binary
+      const rubyBin = process.platform === 'win32' && fs.existsSync('C:\\Ruby34-x64\\bin\\ruby.exe')
+        ? 'C:\\Ruby34-x64\\bin\\ruby.exe'
+        : 'ruby';
+
+      const res = spawnSync(rubyBin, ['-e', rubyCode], { encoding: 'utf8' });
+      return res;
+    }
+
+    it('28. Actual Fastlane Ruby guard accepts valid configuration', function () {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const dartPath = writeFixture('options.dart', `
+class DefaultFirebaseOptions {
+  static const android = FirebaseOptions(storageBucket: '${TEST_SYNTHETIC_BUCKET}');
+  static const ios = FirebaseOptions(storageBucket: '${TEST_SYNTHETIC_BUCKET}');
+}
+`);
+      const wrapperPath = writeFixture('wrapper.dart', `
+class DefaultFirebaseOptionsStaging {
+  static const String expectedProjectId = 'study-buddy-54266';
+  static const String expectedProjectNumber = '194789753908';
+  static const String? authoritativeStorageBucket = '${TEST_SYNTHETIC_BUCKET}';
+}
+`);
+
+      const res = runRubyGuard({
+        expectedBucket: TEST_SYNTHETIC_BUCKET,
+        stagingAppId: '1:194789753908:android:a1b2c3d4e5f6',
+        serviceCreds: 'creds.json',
+        testers: 'test@example.com',
+        googleServicesPath: androidPath,
+        dartGeneratedPath: dartPath,
+        dartWrapperPath: wrapperPath,
+      });
+
+      if (res.error && res.error.code === 'ENOENT') {
+        this.skip(); // Ruby not installed on this test host
+      }
+      if (res.status === 3221225506 || (res.status !== 0 && !res.stderr && !res.stdout)) {
+        this.skip(); // Sandbox boundary restriction prevented spawning external Ruby binary
+      }
+
+      assert.strictEqual(res.status, 0, `Ruby guard failed unexpectedly: ${res.stderr || res.stdout}`);
+    });
+
+    it('29. Actual Fastlane Ruby guard rejects invalid App ID prefix', function () {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const res = runRubyGuard({
+        expectedBucket: TEST_SYNTHETIC_BUCKET,
+        stagingAppId: '1:194789753908:ios:f6e5d4c3b2a1',
+        serviceCreds: 'creds.json',
+        testers: 'test@example.com',
+        googleServicesPath: androidPath,
+      });
+
+      if (res.error && res.error.code === 'ENOENT') {
+        this.skip();
+      }
+      if (res.status === 3221225506 || (res.status !== 0 && !res.stderr && !res.stdout)) {
+        this.skip();
+      }
+
+      assert.notStrictEqual(res.status, 0);
+      assert.match(res.stderr, /must begin with '1:194789753908:android:'/);
+    });
+
+    it('30. Actual Fastlane Ruby guard rejects mismatched App ID', function () {
+      const androidPath = writeFixture('android.json', validStagingConfig);
+      const res = runRubyGuard({
+        expectedBucket: TEST_SYNTHETIC_BUCKET,
+        stagingAppId: '1:194789753908:android:mismatched_app_id_999',
+        serviceCreds: 'creds.json',
+        testers: 'test@example.com',
+        googleServicesPath: androidPath,
+      });
+
+      if (res.error && res.error.code === 'ENOENT') {
+        this.skip();
+      }
+      if (res.status === 3221225506 || (res.status !== 0 && !res.stderr && !res.stdout)) {
+        this.skip();
+      }
+
+      assert.notStrictEqual(res.status, 0);
+      assert.match(res.stderr, /does not match mobilesdk_app_id in google-services\.json/);
+    });
+
+    it('31. Actual Fastlane Ruby guard fails when google-services.json is missing', function () {
+      const res = runRubyGuard({
+        expectedBucket: TEST_SYNTHETIC_BUCKET,
+        stagingAppId: '1:194789753908:android:a1b2c3d4e5f6',
+        serviceCreds: 'creds.json',
+        testers: 'test@example.com',
+        googleServicesPath: path.join(tempDir, 'nonexistent.json'),
+      });
+
+      if (res.error && res.error.code === 'ENOENT') {
+        this.skip();
+      }
+      if (res.status === 3221225506 || (res.status !== 0 && !res.stderr && !res.stdout)) {
+        this.skip();
+      }
+
+      assert.notStrictEqual(res.status, 0);
+      assert.match(res.stderr, /Staging google-services\.json not found/);
     });
   });
 });

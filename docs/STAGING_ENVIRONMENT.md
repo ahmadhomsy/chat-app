@@ -95,6 +95,11 @@ The Google Services Gradle plugin resolves `google-services.json` per flavor:
   - `ios/Runner/Firebase/Staging/GoogleService-Info.plist`
 - Automated Build Phase Run Script in Xcode (`Runner.xcodeproj/project.pbxproj` invoking `ios/scripts/select_firebase_plist.sh`):
   Deterministic POSIX shell script selecting the appropriate flavor plist based on `$FLUTTER_FLAVOR` or `$CONFIGURATION` and failing closed (`exit 1`) if the configuration is unknown, if the flavor is unsupported (e.g. `development`), or if the requested plist does not exist or fails identity validation (verifies `PROJECT_ID`, `GCM_SENDER_ID`, `BUNDLE_ID`, `GOOGLE_APP_ID`, and `STORAGE_BUCKET`). Staging never falls back to Production.
+  - **Xcode Build Phase Storage Bucket Propagation:**
+    The mandatory `EXPECTED_STAGING_STORAGE_BUCKET` reaches the `select_firebase_plist.sh` build phase through invocation environment inheritance:
+    - *CI/CD Pipelines:* Exported in the shell environment prior to executing `flutter build ios` or `xcodebuild` (e.g., via GitHub Actions `env.EXPECTED_STAGING_STORAGE_BUCKET` or Fastlane environment). Xcode Run Script build phases inherit all environment variables from the parent invocation shell.
+    - *Local Xcode Development:* Configured in Xcode under Scheme Environment Variables (`Product` -> `Scheme` -> `Edit Scheme...` -> `Run` -> `Arguments` -> `Environment Variables`: add `EXPECTED_STAGING_STORAGE_BUCKET`), or supplied in a build configuration `.xcconfig`.
+    - *Fail-Closed Enforcement:* If `EXPECTED_STAGING_STORAGE_BUCKET` is unset or empty during a Staging build, `select_firebase_plist.sh` immediately fails closed with `exit 1` (`FATAL: EXPECTED_STAGING_STORAGE_BUCKET is required for staging flavor verification`), ensuring unverified configurations cannot produce an iOS binary.
 
 ### Post-IAM Provisioning Procedure & Activation Runbook
 Because Firebase IAM access to `study-buddy-54266` currently returns `403 PERMISSION_DENIED`, Staging is intentionally held in a **fail-closed** unconfigured state (`DefaultFirebaseOptionsStaging.authoritativeStorageBucket = null`). Running `flutterfire configure` alone is **not sufficient** to enable Staging while `authoritativeStorageBucket` is null.
@@ -107,10 +112,12 @@ Once an authorized administrator grants `roles/firebase.admin` on project `study
    - iOS: `com.example.chatApp.staging`
 
 2. **Obtain Authoritative Storage Bucket:**
-   Retrieve the genuine Storage Bucket from the Firebase Console or GCP CLI:
+   Retrieve the genuine Storage Bucket from the Google Cloud SDK CLI:
    ```bash
-   firebase storage:buckets:list --project study-buddy-54266
+   gcloud storage buckets list --project=study-buddy-54266
    ```
+   Alternatively, query the Firebase Storage Management REST API:
+   `GET https://firebasestorage.googleapis.com/v1beta/projects/study-buddy-54266/buckets`
    Do not guess the bucket name from the project ID.
 
 3. **Generate Staging FlutterFire Options:**

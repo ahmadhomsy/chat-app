@@ -1,53 +1,39 @@
 default_platform(:android)
 
+require_relative 'staging_distribution_guard'
+
 platform :android do
   desc "Lane For Android Firebase App Distribution"
   lane :firebase_distribution do
     sh "flutter clean"
     sh "flutter build apk --release --flavor production --target lib/main_production.dart --no-tree-shake-icons"
     firebase_app_distribution(
-    app: "1:639830188590:android:4a3b1c669d60ee593235bf",
-    firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"],
-    android_artifact_type: "APK",
-    android_artifact_path: "../build/app/outputs/apk/production/release/app-production-release.apk",
-    testers: "2004ahmadhomsy@gmail.com",
-    release_notes: "First Fastlane Firebase Distribution",
-    upload_timeout: 900
-  )  end
+      app: "1:639830188590:android:4a3b1c669d60ee593235bf",
+      firebase_cli_token: ENV["FIREBASE_CLI_TOKEN"],
+      android_artifact_type: "APK",
+      android_artifact_path: "../build/app/outputs/apk/production/release/app-production-release.apk",
+      testers: "2004ahmadhomsy@gmail.com",
+      release_notes: "First Fastlane Firebase Distribution",
+      upload_timeout: 900
+    )
+  end
 
   desc "Lane For Android Firebase App Distribution (Staging)"
   lane :firebase_distribution_staging do
     staging_app_id = ENV["STAGING_FIREBASE_APP_ID"]
     service_creds = ENV["GOOGLE_APPLICATION_CREDENTIALS"]
     testers = ENV["STAGING_TESTERS"]
+    expected_bucket = ENV["EXPECTED_STAGING_STORAGE_BUCKET"] || ENV["STAGING_STORAGE_BUCKET"]
 
-    UI.user_error!("Missing required environment variable STAGING_FIREBASE_APP_ID for staging distribution") if staging_app_id.nil? || staging_app_id.strip.empty?
-    UI.user_error!("Missing required environment variable GOOGLE_APPLICATION_CREDENTIALS for staging distribution") if service_creds.nil? || service_creds.strip.empty?
-    UI.user_error!("Missing required environment variable STAGING_TESTERS for staging distribution") if testers.nil? || testers.strip.empty?
-
-    unless staging_app_id.start_with?("1:194789753908:android:")
-      UI.user_error!("STAGING_FIREBASE_APP_ID '#{staging_app_id}' is invalid: must begin with '1:194789753908:android:' (cannot accept iOS or non-staging app ID)")
-    end
-
-    # Cross-verify with google-services.json
-    google_services_path = File.expand_path("../app/src/staging/google-services.json", __dir__)
-    if File.exist?(google_services_path)
-      require 'json'
-      gs_content = JSON.parse(File.read(google_services_path))
-      clients = gs_content["client"] || []
-      staging_client = clients.find { |c| c.dig("client_info", "android_client_info", "package_name") == "com.example.chat_app.staging" }
-      gs_app_id = staging_client&.dig("client_info", "mobilesdk_app_id")
-
-      if gs_app_id.nil? || gs_app_id.strip.empty?
-        UI.user_error!("No matching client with package 'com.example.chat_app.staging' found in #{google_services_path}")
-      end
-
-      if gs_app_id != staging_app_id
-        UI.user_error!("STAGING_FIREBASE_APP_ID ('#{staging_app_id}') does not match mobilesdk_app_id in google-services.json ('#{gs_app_id}')")
-      end
-    else
-      UI.user_error!("Staging google-services.json not found at #{google_services_path}")
-    end
+    # Execute authoritative Storage Bucket and configuration guard BEFORE anything else
+    repo_root = File.expand_path('../..', __dir__)
+    StagingDistributionGuard.validate!(
+      repo_root: repo_root,
+      expected_bucket: expected_bucket,
+      staging_app_id: staging_app_id,
+      service_creds: service_creds,
+      testers: testers
+    )
 
     sh "flutter clean"
     sh "flutter build apk --release --flavor staging --target lib/main_staging.dart --no-tree-shake-icons"

@@ -94,6 +94,12 @@ jobs:
           echo "$STAGING_FIREBASE_OPTIONS" | base64 --decode > lib/firebase_options_staging.generated.dart
           flutter test tool/validate_staging_options.dart
 
+      - name: Validate Staging Runtime Wrapper Authoritative Storage Bucket
+        env:
+          EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}
+        run: |
+          node tool/validate_staging_runtime_wrapper.js
+
       - name: Validate Staging Cross-File Storage Bucket Consistency
         env:
           EXPECTED_STAGING_STORAGE_BUCKET: ${{ secrets.STAGING_STORAGE_BUCKET }}

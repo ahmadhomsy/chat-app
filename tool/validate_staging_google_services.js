@@ -1,8 +1,24 @@
 const fs = require('fs');
+const path = require('path');
+
+const REPO_ROOT = path.resolve(__dirname, '..');
+
+const PROD_BUCKETS = [
+  'chat-app-28ac0.firebasestorage.app',
+  'chat-app-28ac0.appspot.com',
+];
+
+function resolveRepoPath(filePath) {
+  if (!filePath) return filePath;
+  if (path.isAbsolute(filePath)) return filePath;
+  return path.resolve(REPO_ROOT, filePath);
+}
 
 function validateGoogleServices(filePath, expectedStorageBucket) {
-  if (!fs.existsSync(filePath)) {
-    throw new Error(`File not found: ${filePath}`);
+  const resolvedPath = resolveRepoPath(filePath);
+
+  if (!fs.existsSync(resolvedPath)) {
+    throw new Error(`File not found: ${resolvedPath}`);
   }
 
   // Mandatory authoritative expectedStorageBucket check
@@ -11,12 +27,17 @@ function validateGoogleServices(filePath, expectedStorageBucket) {
   }
 
   const cleanExpectedBucket = expectedStorageBucket.trim();
-  if (cleanExpectedBucket === 'chat-app-28ac0.firebasestorage.app' || cleanExpectedBucket === 'chat-app-28ac0.appspot.com') {
+  if (PROD_BUCKETS.includes(cleanExpectedBucket)) {
     throw new Error(`Authoritative expectedStorageBucket cannot match Production bucket "${cleanExpectedBucket}"`);
   }
 
-  const raw = fs.readFileSync(filePath, 'utf8');
-  const json = JSON.parse(raw);
+  const raw = fs.readFileSync(resolvedPath, 'utf8');
+  let json;
+  try {
+    json = JSON.parse(raw);
+  } catch (e) {
+    throw new Error(`Malformed JSON in google-services.json: ${e.message}`);
+  }
 
   const pInfo = json.project_info || {};
   if (pInfo.project_id !== 'study-buddy-54266') {
@@ -30,7 +51,7 @@ function validateGoogleServices(filePath, expectedStorageBucket) {
   if (!bucket || typeof bucket !== 'string' || bucket.trim() === '') {
     throw new Error('Missing or empty storage_bucket in project_info');
   }
-  if (bucket === 'chat-app-28ac0.firebasestorage.app' || bucket === 'chat-app-28ac0.appspot.com') {
+  if (PROD_BUCKETS.includes(bucket)) {
     throw new Error(`Production storage bucket detected in Staging google-services.json: "${bucket}"`);
   }
   if (bucket !== cleanExpectedBucket) {
@@ -53,12 +74,13 @@ function validateGoogleServices(filePath, expectedStorageBucket) {
     projectNumber: pInfo.project_number,
     appId,
     storageBucket: bucket,
+    filePath: resolvedPath,
   };
 }
 
 if (require.main === module) {
   const targetPath = process.argv[2] || 'android/app/src/staging/google-services.json';
-  const expectedBucket = process.env.EXPECTED_STAGING_STORAGE_BUCKET || process.argv[3];
+  const expectedBucket = process.env.EXPECTED_STAGING_STORAGE_BUCKET || process.env.STAGING_STORAGE_BUCKET || process.argv[3];
   try {
     const res = validateGoogleServices(targetPath, expectedBucket);
     console.log(`Successfully validated Staging google-services.json (Project: ${res.projectId}, App ID: ${res.appId}, Storage Bucket: ${res.storageBucket})`);
@@ -68,4 +90,7 @@ if (require.main === module) {
   }
 }
 
-module.exports = { validateGoogleServices };
+module.exports = {
+  validateGoogleServices,
+  resolveRepoPath,
+};
